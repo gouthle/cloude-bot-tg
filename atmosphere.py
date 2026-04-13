@@ -174,7 +174,7 @@ async def show_history(message: types.Message):
 
 @dp.message(F.text == "🤝 Поддержка")
 async def support_handler(message: types.Message):
-    await message.answer("По всем вопросам и для заказа: @твой_ник\nРаботаем ежедневно! 🚀")
+    await message.answer("По всем вопросам и для заказа: @@Deliveryono\nРаботаем ежедневно! 🚀")
 
 # --- ЗАПУСК ---
 async def main():
