@@ -9,181 +9,193 @@ from aiogram.filters import CommandStart
 from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
 from dotenv import load_dotenv
 
-# --- МИКРО-СЕРВЕР ДЛЯ RENDER (чтобы не засыпал) ---
+# --- Веб-заглушка для рендера ---
 app = Flask('')
 @app.route('/')
-def home(): return "Cloude Bot is alive!"
+def main_page(): return "Cloude Bot: Active"
 
-def run_flask():
+def start_web_server():
     app.run(host='0.0.0.0', port=8080)
 
-# --- НАСТРОЙКИ БОТА ---
+# --- Конфиг ---
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
-BOT_TOKEN = os.getenv('BOT_TOKEN')
 
-bot = Bot(token=BOT_TOKEN)
+TOKEN = os.getenv('BOT_TOKEN')
+ADMIN = os.getenv('ADMIN_ID')
+# Переводим в int только если ID прилетел
+if ADMIN:
+    ADMIN = int(ADMIN)
+
+bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# --- БАЗА ДАННЫХ ---
-def init_db():
-    conn = sqlite3.connect('cloude_base.db')
-    cursor = conn.cursor()
-    cursor.execute('CREATE TABLE IF NOT EXISTS cart (user_id INTEGER, item_name TEXT, price INTEGER)')
-    cursor.execute('CREATE TABLE IF NOT EXISTS orders (user_id INTEGER, order_content TEXT, total_price INTEGER, date TIMESTAMP DEFAULT CURRENT_TIMESTAMP)')
-    conn.commit()
-    conn.close()
+# --- Работа с БД (sqlite) ---
+def setup_db():
+    with sqlite3.connect('cloude_base.db') as db:
+        cur = db.cursor()
+        cur.execute('CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, username TEXT)')
+        cur.execute('CREATE TABLE IF NOT EXISTS cart (user_id INTEGER, item_name TEXT, price INTEGER)')
+        cur.execute('CREATE TABLE IF NOT EXISTS orders (user_id INTEGER, order_content TEXT, total_price INTEGER, date TIMESTAMP DEFAULT CURRENT_TIMESTAMP)')
+        db.commit()
 
-init_db()
+# --- Кнопки ---
+def get_main_menu():
+    kb = ReplyKeyboardBuilder()
+    kb.row(types.KeyboardButton(text="☁️ Витрина"), types.KeyboardButton(text="📥 Корзина"))
+    kb.row(types.KeyboardButton(text="📜 История заказов"), types.KeyboardButton(text="🤝 Поддержка"))
+    return kb.as_markup(resize_keyboard=True)
 
-# --- КЛАВИАТУРЫ ---
-def main_menu_kb():
-    builder = ReplyKeyboardBuilder()
-    builder.row(types.KeyboardButton(text="☁️ Витрина"), types.KeyboardButton(text="📥 Корзина"))
-    builder.row(types.KeyboardButton(text="📜 История заказов"), types.KeyboardButton(text="🤝 Поддержка"))
-    return builder.as_markup(resize_keyboard=True)
+def get_cats_kb():
+    kb = InlineKeyboardBuilder()
+    kb.add(types.InlineKeyboardButton(text="🧂 Солевые", callback_data="cat_salt"))
+    kb.add(types.InlineKeyboardButton(text="💨 Одноразки", callback_data="cat_disposable"))
+    kb.row(types.InlineKeyboardButton(text="❌ Назад в меню", callback_data="exit_shop"))
+    return kb.as_markup()
 
-def categories_kb():
-    builder = InlineKeyboardBuilder()
-    builder.row(types.InlineKeyboardButton(text="🧂 Солевые", callback_data="cat_salt"))
-    builder.row(types.InlineKeyboardButton(text="💨 Одноразки", callback_data="cat_disposable"))
-    builder.row(types.InlineKeyboardButton(text="❌ Закрыть и вернуть меню", callback_data="close_shop"))
-    return builder.as_markup()
-
-# --- ХЕНДЛЕРЫ ---
+# --- Логика бота ---
 
 @dp.message(CommandStart())
-async def start_command(message: types.Message):
-    await message.answer(
-        f"Привет, {message.from_user.first_name}! 👋\nДобро пожаловать в **Cloude**.\nВыбирай раздел:",
-        reply_markup=main_menu_kb(),
+async def welcome(msg: types.Message):
+    # Логиним юзера в базу при старте
+    with sqlite3.connect('cloude_base.db') as db:
+        db.execute("INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)", 
+                   (msg.from_user.id, msg.from_user.username))
+    
+    await msg.answer(
+        f"Салют, {msg.from_user.first_name}! 👋\n\nЭто **Cloude**. "
+        "Твой проводник в мире пара в Кракове. Глянь, что у нас есть:",
+        reply_markup=get_main_menu(),
         parse_mode="Markdown"
     )
 
 @dp.message(F.text == "☁️ Витрина")
-async def shop_catalog(message: types.Message):
-    # Удаляем нижнее меню, чтобы открыть инлайн-витрину
-    await message.answer("Загружаю витрину...", reply_markup=types.ReplyKeyboardRemove())
-    await message.answer("✨ **Каталог Cloude**\nВыбери категорию:", reply_markup=categories_kb(), parse_mode="Markdown")
+async def show_catalog(msg: types.Message):
+    await msg.answer("Минутку, открываю каталог...", reply_markup=types.ReplyKeyboardRemove())
+    await msg.answer("🔥 **Каталог Cloude**\nВыбирай категорию:", reply_markup=get_cats_kb(), parse_mode="Markdown")
 
-@dp.callback_query(F.data == "close_shop")
-async def close_shop(callback: types.CallbackQuery):
-    await callback.message.delete()
-    await callback.message.answer("Меню возвращено. Что делаем дальше?", reply_markup=main_menu_kb())
-    await callback.answer()
+@dp.callback_query(F.data == "exit_shop")
+async def exit_shop(call: types.CallbackQuery):
+    await call.message.delete()
+    await call.message.answer("Главное меню:", reply_markup=get_main_menu())
+    await call.answer()
 
 @dp.callback_query(F.data.startswith("cat_"))
-async def show_items(callback: types.CallbackQuery):
-    category = callback.data.split("_")[1]
-    builder = InlineKeyboardBuilder()
+async def items_list(call: types.CallbackQuery):
+    cat = call.data.split("_")[1]
+    kb = InlineKeyboardBuilder()
     
-    if category == "salt":
-        items = [("Husky Double Ice", 45), ("Chilly Mans", 42), ("Jam Monster", 50)]
+    # Список товаров (можно потом в БД вынести)
+    if cat == "salt":
+        data = [("Husky Double Ice", 45), ("Chilly Mans", 42), ("Jam Monster", 50)]
     else:
-        items = [("Elf Bar 5000", 65), ("Lost Mary 5000", 70)]
+        data = [("Elf Bar 5000", 65), ("Lost Mary 5000", 70)]
 
-    for name, price in items:
-        builder.row(types.InlineKeyboardButton(text=f"{name} — {price}zł", callback_data=f"buy_{name}_{price}"))
+    for name, price in data:
+        kb.row(types.InlineKeyboardButton(text=f"{name} — {price}zł", callback_data=f"add_{name}_{price}"))
     
-    builder.row(types.InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_cats"))
-    await callback.message.edit_text("🛒 Выбери товар, чтобы добавить в корзину:", reply_markup=builder.as_markup())
-    await callback.answer()
+    kb.row(types.InlineKeyboardButton(text="⬅️ К категориям", callback_data="back_cats"))
+    await call.message.edit_text("🛒 Кликни на позицию, чтобы закинуть в корзину:", reply_markup=kb.as_markup())
+    await call.answer()
 
-@dp.callback_query(F.data == "back_to_cats")
-async def back_to_cats(callback: types.CallbackQuery):
-    await callback.message.edit_text("✨ **Каталог Cloude**\nВыбери категорию:", reply_markup=categories_kb(), parse_mode="Markdown")
-    await callback.answer()
+@dp.callback_query(F.data == "back_cats")
+async def back_cats(call: types.CallbackQuery):
+    await call.message.edit_text("🔥 **Каталог Cloude**\nВыбирай категорию:", reply_markup=get_cats_kb(), parse_mode="Markdown")
+    await call.answer()
 
-@dp.callback_query(F.data.startswith("buy_"))
-async def add_to_cart(callback: types.CallbackQuery):
-    _, name, price = callback.data.split("_")
-    conn = sqlite3.connect('cloude_base.db')
-    cursor = conn.cursor()
-    cursor.execute("INSERT INTO cart (user_id, item_name, price) VALUES (?, ?, ?)", (callback.from_user.id, name, int(price)))
-    conn.commit()
-    conn.close()
-    await callback.answer(f"✅ {name} добавлен!")
+@dp.callback_query(F.data.startswith("add_"))
+async def to_cart(call: types.CallbackQuery):
+    _, name, price = call.data.split("_")
+    with sqlite3.connect('cloude_base.db') as db:
+        db.execute("INSERT INTO cart (user_id, item_name, price) VALUES (?, ?, ?)", 
+                   (call.from_user.id, name, int(price)))
+    await call.answer(f"➕ {name} в корзине!")
 
 @dp.message(F.text == "📥 Корзина")
-async def show_cart(message: types.Message):
-    conn = sqlite3.connect('cloude_base.db')
-    cursor = conn.cursor()
-    cursor.execute("SELECT item_name, price FROM cart WHERE user_id = ?", (message.from_user.id,))
-    items = cursor.fetchall()
-    conn.close()
+async def view_cart(msg: types.Message):
+    with sqlite3.connect('cloude_base.db') as db:
+        items = db.execute("SELECT item_name, price FROM cart WHERE user_id = ?", (msg.from_user.id,)).fetchall()
 
     if not items:
-        await message.answer("🛒 Твоя корзина пуста. Загляни на витрину!")
-        return
+        return await msg.answer("В корзине пока пусто... Исправим? 😏")
 
-    res = "🛒 **Твоя корзина:**\n\n"
+    text = "🛒 **Твоя корзина:**\n\n"
     total = sum(i[1] for i in items)
-    for name, price in items:
-        res += f"• {name} — {price}zł\n"
-    res += f"\n**Итого: {total}zł**"
+    for n, p in items:
+        text += f"▫️ {n} — {p}zł\n"
+    text += f"\n**Итого к оплате: {total}zł**"
 
-    builder = InlineKeyboardBuilder()
-    builder.row(types.InlineKeyboardButton(text="✅ Оформить заказ", callback_data="checkout"))
-    builder.row(types.InlineKeyboardButton(text="🗑 Очистить", callback_data="clear_cart"))
-    await message.answer(res, reply_markup=builder.as_markup(), parse_mode="Markdown")
+    kb = InlineKeyboardBuilder()
+    kb.row(types.InlineKeyboardButton(text="🚀 Заказать", callback_data="confirm_order"))
+    kb.row(types.InlineKeyboardButton(text="🗑 Очистить", callback_data="empty_cart"))
+    await msg.answer(text, reply_markup=kb.as_markup(), parse_mode="Markdown")
 
-@dp.callback_query(F.data == "clear_cart")
-async def clear_cart(callback: types.CallbackQuery):
-    conn = sqlite3.connect('cloude_base.db')
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM cart WHERE user_id = ?", (callback.from_user.id,))
-    conn.commit()
-    conn.close()
-    await callback.message.edit_text("🗑 Корзина очищена.")
-    await callback.answer()
+@dp.callback_query(F.data == "confirm_order")
+async def make_order(call: types.CallbackQuery):
+    with sqlite3.connect('cloude_base.db') as db:
+        items = db.execute("SELECT item_name, price FROM cart WHERE user_id = ?", (call.from_user.id,)).fetchall()
+        
+        if items:
+            summary = ", ".join([i[0] for i in items])
+            total = sum(i[1] for i in items)
+            db.execute("INSERT INTO orders (user_id, order_content, total_price) VALUES (?, ?, ?)", 
+                       (call.from_user.id, summary, total))
+            db.execute("DELETE FROM cart WHERE user_id = ?", (call.from_user.id,))
+            
+            # Стук админу
+            if ADMIN:
+                try:
+                    await bot.send_message(ADMIN, f"⚡️ **НОВЫЙ ЧЕК!**\n\nЮзер: {call.from_user.first_name} (@{call.from_user.username})\nЗаказ: {summary}\nПрайс: {total}zł")
+                except: pass
 
-@dp.callback_query(F.data == "checkout")
-async def checkout(callback: types.CallbackQuery):
-    conn = sqlite3.connect('cloude_base.db')
-    cursor = conn.cursor()
-    cursor.execute("SELECT item_name, price FROM cart WHERE user_id = ?", (callback.from_user.id,))
-    items = cursor.fetchall()
-    
-    if items:
-        order_content = ", ".join([i[0] for i in items])
-        total = sum(i[1] for i in items)
-        cursor.execute("INSERT INTO orders (user_id, order_content, total_price) VALUES (?, ?, ?)", 
-                       (callback.from_user.id, order_content, total))
-        cursor.execute("DELETE FROM cart WHERE user_id = ?", (callback.from_user.id,))
-        conn.commit()
-        await callback.message.edit_text(f"🚀 **Заказ принят!**\nСумма: {total}zł\nСкоро напишем для уточнения доставки.")
-    conn.close()
-    await callback.answer()
+            await call.message.edit_text(f"🚀 **Улетело в обработку!**\nСумма: {total}zł\nСкоро свяжемся с тобой.")
+    await call.answer()
 
 @dp.message(F.text == "📜 История заказов")
-async def show_history(message: types.Message):
-    conn = sqlite3.connect('cloude_base.db')
-    cursor = conn.cursor()
-    cursor.execute("SELECT order_content, total_price, date FROM orders WHERE user_id = ? ORDER BY date DESC", (message.from_user.id,))
-    orders = cursor.fetchall()
-    conn.close()
+async def history(msg: types.Message):
+    with sqlite3.connect('cloude_base.db') as db:
+        rows = db.execute("SELECT order_content, total_price, date FROM orders WHERE user_id = ? ORDER BY date DESC", (msg.from_user.id,)).fetchall()
 
-    if not orders:
-        await message.answer("У тебя еще нет покупок.")
-        return
+    if not rows:
+        return await msg.answer("Тут пока нет записей о покупках.")
 
-    res = "📜 **Твои заказы:**\n\n"
-    for content, total, date in orders:
-        res += f"📅 {date[:10]} | {total}zł\n📦 {content}\n\n"
-    await message.answer(res, parse_mode="Markdown")
+    res = "📜 **Твои прошлые заказы:**\n\n"
+    for cont, pr, dt in rows:
+        res += f"📅 {dt[:10]} | {pr}zł\n📦 {cont}\n\n"
+    await msg.answer(res, parse_mode="Markdown")
+
+@dp.callback_query(F.data == "empty_cart")
+async def empty_cart(call: types.CallbackQuery):
+    with sqlite3.connect('cloude_base.db') as db:
+        db.execute("DELETE FROM cart WHERE user_id = ?", (call.from_user.id,))
+    await call.message.edit_text("🗑 Корзина теперь пуста.")
+    await call.answer()
 
 @dp.message(F.text == "🤝 Поддержка")
-async def support_handler(message: types.Message):
-    await message.answer("По всем вопросам и для заказа: @@Deliveryono\nРаботаем ежедневно! 🚀")
+async def help_me(msg: types.Message):
+    await msg.answer("Есть вопросы или предложения? Пиши нам: @твой_ник\nДоставка по городу 💨")
 
-# --- ЗАПУСК ---
-async def main():
-    # Запуск Flask в потоке (чтобы Render не ругался)
-    threading.Thread(target=run_flask, daemon=True).start()
-    try:
-        await dp.start_polling(bot)
-    finally:
-        await bot.session.close()
+# --- Рассылка для админа ---
+@dp.message(F.text.startswith("!send"), F.from_user.id == ADMIN)
+async def spam(msg: types.Message):
+    text = msg.text.replace("!send", "").strip()
+    with sqlite3.connect('cloude_base.db') as db:
+        users = db.execute("SELECT user_id FROM users").fetchall()
+
+    count = 0
+    for (u_id,) in users:
+        try:
+            await bot.send_message(u_id, f"📣 **Cloude News:**\n\n{text}", parse_mode="Markdown")
+            count += 1
+            await asyncio.sleep(0.1)
+        except: pass
+    await msg.answer(f"Разослал {count} людям.")
+
+# --- Запуск ---
+async def start():
+    setup_db()
+    threading.Thread(target=start_web_server, daemon=True).start()
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(start())
