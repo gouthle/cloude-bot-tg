@@ -68,8 +68,6 @@ Start Command: python atmosphere.py
 
 EN
 
-Конечно, держи версию на английском. В IT-среде (и для того же GitHub) это стандарт де-факто, так проект выглядит солиднее.
-
 ☁️ Cloude Atmosphere Bot
 A professional Telegram bot designed for automating sales (vape shop) in Kraków, Poland. Features a sleek storefront, referral system, and seamless InPost delivery integration.
 
