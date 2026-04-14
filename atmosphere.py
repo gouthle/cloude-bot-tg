@@ -76,7 +76,7 @@ async def start(msg: types.Message):
     with sqlite3.connect('cloude_base.db') as db:
         db.execute("INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)", 
                    (msg.from_user.id, msg.from_user.username))
-    await msg.answer(f"Здарова, {msg.from_user.first_name}! 👋\nДобро пожаловать в **Cloude**.\nВыбирай товар:", 
+    await msg.answer(f"Привет, {msg.from_user.first_name}! 👋\nДобро пожаловать в **Cloude**.\nВыбирай товар:", 
                      reply_markup=main_kb(), parse_mode="Markdown")
 
 @dp.message(F.text == "☁️ Витрина")
