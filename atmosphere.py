@@ -25,8 +25,9 @@ TOKEN = os.getenv('BOT_TOKEN')
 ADMIN = os.getenv('ADMIN_ID')
 if ADMIN: ADMIN = int(ADMIN)
 
-# Твой номер для BLIK (замени на реальный в Render или тут)
+# Твой номер для BLIK и ссылка на отзывы
 PHONE_NUMBER = "+48 123 456 789" 
+REVIEWS_URL = "https://t.me/+cbqxYZH0tzE4MDUy"
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -58,8 +59,8 @@ STOCKS = {
 # --- Кнопки меню ---
 def main_kb():
     kb = ReplyKeyboardBuilder()
-    kb.row(types.KeyboardButton(text="☁️ Витрина"), types.KeyboardButton(text="📜 Мои заказы"))
-    kb.row(types.KeyboardButton(text="🤝 Поддержка"))
+    kb.row(types.KeyboardButton(text="☁️ Витрина"), types.KeyboardButton(text="📥 Мои заказы"))
+    kb.row(types.KeyboardButton(text="⭐️ Отзывы"), types.KeyboardButton(text="🤝 Поддержка"))
     return kb.as_markup(resize_keyboard=True)
 
 def cats_kb():
@@ -76,13 +77,19 @@ async def start(msg: types.Message):
     with sqlite3.connect('cloude_base.db') as db:
         db.execute("INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)", 
                    (msg.from_user.id, msg.from_user.username))
-    await msg.answer(f"Привет, {msg.from_user.first_name}! 👋\nДобро пожаловать в **Cloude**.\nВыбирай товар:", 
+    await msg.answer(f"Здарова, {msg.from_user.first_name}! 👋\nВыбирай товар в **Cloude**:", 
                      reply_markup=main_kb(), parse_mode="Markdown")
 
 @dp.message(F.text == "☁️ Витрина")
 async def open_shop(msg: types.Message):
     await msg.answer("Секунду, открываю каталог...", reply_markup=types.ReplyKeyboardRemove())
     await msg.answer("✨ **Каталог Cloude**\nВыбери раздел:", reply_markup=cats_kb(), parse_mode="Markdown")
+
+@dp.message(F.text == "⭐️ Отзывы")
+async def show_reviews(msg: types.Message):
+    kb = InlineKeyboardBuilder()
+    kb.row(types.InlineKeyboardButton(text="📖 Читать отзывы", url=REVIEWS_URL))
+    await msg.answer("Наши клиенты говорят сами за себя! 👇", reply_markup=kb.as_markup())
 
 @dp.callback_query(F.data.startswith("cat_"))
 async def list_brands(call: types.CallbackQuery):
@@ -110,7 +117,6 @@ async def list_flavors(call: types.CallbackQuery):
     for f in flavors:
         kb.row(types.InlineKeyboardButton(text=f, callback_data=f"sel_{brand}_{f}_45"))
     
-    # Кнопка назад в зависимости от типа товара
     prev = "cat_liq" if "Salt" in brand or "Husky" in brand else "cat_disp"
     kb.row(types.InlineKeyboardButton(text="⬅️ К брендам", callback_data=prev))
     
@@ -137,7 +143,7 @@ async def payment(call: types.CallbackQuery):
             f"Тип: {delivery}\n"
             f"**Итого: {total}zł**\n\n"
             f"Переведи сумму по BLIK на номер:\n`{PHONE_NUMBER}`\n\n"
-            f"Как только переведешь — жми кнопку ниже. Менеджер сразу увидит чек.")
+            f"Как только переведешь — жми кнопку ниже.")
     
     kb = InlineKeyboardBuilder()
     kb.row(types.InlineKeyboardButton(text="✅ Оплачено", callback_data=f"done_{brand}_{flavor}_{total}_{delivery}"))
@@ -178,7 +184,7 @@ async def exit_shop(call: types.CallbackQuery):
     await call.message.answer("Меню:", reply_markup=main_kb())
     await call.answer()
 
-@dp.message(F.text == "📜 Мои заказы")
+@dp.message(F.text == "📥 Мои заказы")
 async def history(msg: types.Message):
     with sqlite3.connect('cloude_base.db') as db:
         rows = db.execute("SELECT item_name, flavor, total, date FROM orders WHERE user_id = ? ORDER BY date DESC", (msg.from_user.id,)).fetchall()
@@ -189,9 +195,10 @@ async def history(msg: types.Message):
 
 @dp.message(F.text == "🤝 Поддержка")
 async def support(msg: types.Message):
-    await msg.answer("По всем вопросам: @твой_ник\nРаботаем по Кракову 🚀")
+    kb = InlineKeyboardBuilder()
+    kb.row(types.InlineKeyboardButton(text="⭐️ Группа с отзывами", url=REVIEWS_URL))
+    await msg.answer("По всем вопросам: @твой_ник\nРаботаем по Кракову 🚀", reply_markup=kb.as_markup())
 
-# Рассылка: !send Текст
 @dp.message(F.text.startswith("!send"), F.from_user.id == ADMIN)
 async def spam(msg: types.Message):
     t = msg.text.replace("!send", "").strip()
