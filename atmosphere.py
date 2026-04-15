@@ -37,7 +37,8 @@ else:
 PHONE_NUMBER = "+48 123 456 789"  # ЗАМЕНИ НА СВОЙ НОМЕР БЛИК
 REVIEWS_URL = "https://t.me/+cbqxYZH0tzE4MDUy"
 
-bot = Bot(token=TOKEN)
+# УСТАНАВЛИВАЕМ HTML ПО УМОЛЧАНИЮ
+bot = Bot(token=TOKEN, parse_mode="HTML")
 dp = Dispatcher()
 
 # --- ЧАСТЬ 3: РАБОТА С БАЗОЙ ДАННЫХ ---
@@ -115,18 +116,18 @@ async def start_handler(message: types.Message):
     db.close()
     
     welcome_text = (
-        f"Здарова, {message.from_user.first_name}! 👋\n\n"
-        "Ты попал в **Cloude Atmosphere**. Самое лучшее качество у нас!\n\n"
+        f"Здарова, <b>{message.from_user.first_name}</b>! 👋\n\n"
+        "Ты попал в <b>Cloude Atmosphere</b>. Самое лучшее качество у нас!\n\n"
         "Пользуйся меню снизу, чтобы сделать заказ. Если возникнут вопросы — жми 'Поддержка'."
     )
-    await message.answer(welcome_text, reply_markup=get_main_keyboard(), parse_mode="Markdown")
+    await message.answer(welcome_text, reply_markup=get_main_keyboard())
 
 @dp.message(F.text == "☁️ Витрина")
 async def catalog_handler(message: types.Message):
     keyboard = InlineKeyboardBuilder()
     keyboard.row(types.InlineKeyboardButton(text="🧂 Жидкости (Husky, Elfliq)", callback_data="cat_liq"))
     keyboard.row(types.InlineKeyboardButton(text="💨 Одноразки (Vozol)", callback_data="cat_disp"))
-    await message.answer("✨ **Каталог продукции**\nВыбери нужную категорию:", reply_markup=keyboard.as_markup())
+    await message.answer("✨ <b>Каталог продукции</b>\nВыбери нужную категорию:", reply_markup=keyboard.as_markup())
 
 @dp.callback_query(F.data.startswith("cat_"))
 async def brands_callback(call: types.CallbackQuery):
@@ -142,7 +143,7 @@ async def brands_callback(call: types.CallbackQuery):
         keyboard.row(types.InlineKeyboardButton(text=brand, callback_data=f"brand_{brand}"))
     
     keyboard.row(types.InlineKeyboardButton(text="⬅️ Назад к категориям", callback_data="back_to_cats"))
-    await call.message.edit_text("🔥 **Доступные бренды:**", reply_markup=keyboard.as_markup(), parse_mode="Markdown")
+    await call.message.edit_text("🔥 <b>Доступные бренды:</b>", reply_markup=keyboard.as_markup())
 
 @dp.callback_query(F.data.startswith("brand_"))
 async def flavors_callback(call: types.CallbackQuery):
@@ -159,9 +160,9 @@ async def flavors_callback(call: types.CallbackQuery):
     
     if brand_data["photo"]:
         await call.message.delete()
-        await call.bot.send_photo(call.from_user.id, brand_data["photo"], caption=f"🍒 **Вкусы {brand_name}:**", reply_markup=keyboard.as_markup())
+        await call.bot.send_photo(call.from_user.id, brand_data["photo"], caption=f"🍒 <b>Вкусы {brand_name}:</b>", reply_markup=keyboard.as_markup())
     else:
-        await call.message.edit_text(f"🍒 **Вкусы {brand_name}:**\nВыбирай свой вариант:", reply_markup=keyboard.as_markup())
+        await call.message.edit_text(f"🍒 <b>Вкусы {brand_name}:</b>\nВыбирай свой вариант:", reply_markup=keyboard.as_markup())
 
 @dp.callback_query(F.data.startswith("select_"))
 async def delivery_callback(call: types.CallbackQuery):
@@ -172,7 +173,7 @@ async def delivery_callback(call: types.CallbackQuery):
     keyboard.row(types.InlineKeyboardButton(text="🤝 Самовывоз Краков (Free)", callback_data=f"pay_{brand}_{flavor}_{price}_Pickup"))
     keyboard.row(types.InlineKeyboardButton(text="⬅️ Назад к вкусам", callback_data=f"brand_{brand}"))
     
-    await call.message.answer(f"📍 **Оформление:** {brand} — {flavor}\n\nВыбери способ получения:", reply_markup=keyboard.as_markup())
+    await call.message.answer(f"📍 <b>Оформление:</b> {brand} — {flavor}\n\nВыбери способ получения:", reply_markup=keyboard.as_markup())
     await call.message.delete()
 
 @dp.callback_query(F.data.startswith("pay_"))
@@ -180,11 +181,11 @@ async def payment_callback(call: types.CallbackQuery):
     _, brand, flavor, total, delivery = call.data.split("_")
     
     pay_text = (
-        f"💳 **Оплата заказа**\n\n"
+        f"💳 <b>Оплата заказа</b>\n\n"
         f"Товар: {brand} ({flavor})\n"
         f"Способ: {delivery}\n"
-        f"**Сумма к оплате: {total}zł**\n\n"
-        f"Переведи ровную сумму по BLIK на номер:\n`{PHONE_NUMBER}`\n\n"
+        f"<b>Сумма к оплате: {total}zł</b>\n\n"
+        f"Переведи ровную сумму по BLIK на номер:\n<code>{PHONE_NUMBER}</code>\n\n"
         "После совершения платежа обязательно нажми кнопку ниже!"
     )
     
@@ -192,7 +193,7 @@ async def payment_callback(call: types.CallbackQuery):
     keyboard.row(types.InlineKeyboardButton(text="✅ Я оплатил(а)", callback_data=f"finish_{brand}_{flavor}_{total}_{delivery}"))
     keyboard.row(types.InlineKeyboardButton(text="❌ Отменить", callback_data="back_to_cats"))
     
-    await call.message.edit_text(pay_text, reply_markup=keyboard.as_markup(), parse_mode="Markdown")
+    await call.message.edit_text(pay_text, reply_markup=keyboard.as_markup())
 
 @dp.callback_query(F.data.startswith("finish_"))
 async def finish_callback(call: types.CallbackQuery):
@@ -205,12 +206,12 @@ async def finish_callback(call: types.CallbackQuery):
     db.close()
     
     if d == "InPost":
-        instruction = "📝 **Важно!**\nПришли следующим сообщением данные для InPost:\n1. Твои ФИО\n2. Номер телефона\n3. Код пачкомата (напр. KRA01M)"
+        instruction = "📝 <b>Важно!</b>\nПришли следующим сообщением данные для InPost:\n1. Твои ФИО\n2. Номер телефона\n3. Код пачкомата (напр. KRA01M)"
         await call.message.answer(instruction)
     else:
         if ADMIN:
-            await bot.send_message(ADMIN, f"⚡️ **НОВЫЙ ЗАКАЗ (САМОВЫВОЗ)**\nЮзер: @{call.from_user.username}\nТовар: {b} {f}\nСумма: {t}zł")
-        await call.message.answer("🚀 **Заказ принят!** Менеджер свяжется с тобой для передачи товара.")
+            await bot.send_message(ADMIN, f"⚡️ <b>НОВЫЙ ЗАКАЗ (САМОВЫВОЗ)</b>\nЮзер: @{call.from_user.username}\nТовар: {b} {f}\nСумма: {t}zł")
+        await call.message.answer("🚀 <b>Заказ принят!</b> Менеджер свяжется с тобой для передачи товара.")
 
 # --- ЧАСТЬ 7: ОБРАБОТКА ТЕКСТА (ДАННЫЕ INPOST И ПЕРЕСЫЛКА АДМИНУ) ---
 @dp.message(F.text, ~F.text.startswith("/"))
@@ -227,12 +228,12 @@ async def text_handler(message: types.Message):
         cursor.execute("UPDATE orders SET info = ?, status = 'Данные получены' WHERE order_id = ?", (message.text, order_id))
         db.commit()
         
-        await message.answer("✅ **Данные получены!**\nМенеджер проверит оплату и отправит твой заказ. Спасибо, что выбрал Cloude!")
+        await message.answer("✅ <b>Данные получены!</b>\nМенеджер проверит оплату и отправит твой заказ. Спасибо, что выбрал Cloude!")
         
         # Уведомляем админа
         if ADMIN:
             admin_report = (
-                f"💰 **НОВЫЙ ЗАКАЗ (InPost)**\n"
+                f"💰 <b>НОВЫЙ ЗАКАЗ (InPost)</b>\n"
                 f"От: @{message.from_user.username}\n"
                 f"Товар: {item} - {flavor}\n"
                 f"Сумма: {total}zł\n"
@@ -248,7 +249,7 @@ async def text_handler(message: types.Message):
 @dp.message(F.text == "💰 Бонусы")
 async def bonus_handler(message: types.Message):
     link = await create_start_link(bot, str(message.from_user.id), encode=True)
-    await message.answer(f"🎁 **Твоя реферальная ссылка:**\n\n`{link}`\n\nПриглашай друзей и получай бонусы на свой баланс!", parse_mode="Markdown")
+    await message.answer(f"🎁 <b>Твоя реферальная ссылка:</b>\n\n<code>{link}</code>\n\nПриглашай друзей и получай бонусы на свой баланс!")
 
 @dp.message(F.text == "⭐️ Отзывы")
 async def reviews_handler(message: types.Message):
@@ -265,10 +266,10 @@ async def my_orders_handler(message: types.Message):
     if not rows:
         return await message.answer("У тебя пока нет заказов.")
     
-    text = "📜 **Последние заказы:**\n\n"
+    text = "📜 <b>Последние заказы:</b>\n\n"
     for item, flav, tot, stat in rows:
-        text += f"▪️ {item} ({flav}) — {tot}zł\nСтатус: *{stat}*\n\n"
-    await message.answer(text, parse_mode="Markdown")
+        text += f"▪️ {item} ({flav}) — {tot}zł\nСтатус: <b>{stat}</b>\n\n"
+    await message.answer(text)
 
 @dp.message(F.text == "🤝 Поддержка")
 async def support_handler(message: types.Message):
@@ -279,12 +280,12 @@ async def back_to_cats(call: types.CallbackQuery):
     keyboard = InlineKeyboardBuilder()
     keyboard.row(types.InlineKeyboardButton(text="🧂 Жидкости", callback_data="cat_liq"))
     keyboard.row(types.InlineKeyboardButton(text="💨 Одноразки", callback_data="cat_disp"))
-    await call.message.edit_text("✨ **Каталог Cloude**", reply_markup=keyboard.as_markup())
+    await call.message.edit_text("✨ <b>Каталог Cloude</b>", reply_markup=keyboard.as_markup())
 
 @dp.message(F.photo)
 async def photo_id_helper(message: types.Message):
     if message.from_user.id == ADMIN:
-        await message.answer(f"ID фото для кода:\n`{message.photo[-1].file_id}`")
+        await message.answer(f"ID фото для кода:\n<code>{message.photo[-1].file_id}</code>")
 
 # --- ЗАПУСК ---
 async def main():
