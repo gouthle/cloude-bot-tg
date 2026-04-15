@@ -116,7 +116,7 @@ async def start_handler(message: types.Message):
     
     welcome_text = (
         f"Здарова, {message.from_user.first_name}! 👋\n\n"
-        "Ты попал в **Cloude Atmosphere**. Самое лучшее качество у нас!.\n\n"
+        "Ты попал в **Cloude Atmosphere**. Самое лучшее качество у нас!\n\n"
         "Пользуйся меню снизу, чтобы сделать заказ. Если возникнут вопросы — жми 'Поддержка'."
     )
     await message.answer(welcome_text, reply_markup=get_main_keyboard(), parse_mode="Markdown")
