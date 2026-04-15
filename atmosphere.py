@@ -37,7 +37,7 @@ else:
 PHONE_NUMBER = "+48 123 456 789"  # ЗАМЕНИ НА СВОЙ НОМЕР БЛИК
 REVIEWS_URL = "https://t.me/+cbqxYZH0tzE4MDUy"
 
-# УСТАНАВЛИВАЕМ HTML ПО УМОЛЧАНИЮ
+# parse_mode="HTML" ТЕПЕРЬ ТУТ, ЧТОБЫ ЖИРНЫЙ ШРИФТ РАБОТАЛ ВЕЗДЕ
 bot = Bot(token=TOKEN, parse_mode="HTML")
 dp = Dispatcher()
 
@@ -200,8 +200,9 @@ async def finish_callback(call: types.CallbackQuery):
     _, b, f, t, d = call.data.split("_")
     
     db = sqlite3.connect('cloude_base.db')
-    db.execute("INSERT INTO orders (user_id, item_name, flavor, total, delivery, info) VALUES (?, ?, ?, ?, ?, ?)",
-               (call.from_user.id, b, f, t, d, "Ожидаем подтверждение"))
+    # УСТАНАВЛИВАЕМ СТАТУС "WAIT_DATA", ЧТОБЫ ХЕНДЛЕР ТЕКСТА ПОНИМАЛ, ЧТО МЫ ЖДЕМ ДАННЫЕ
+    db.execute("INSERT INTO orders (user_id, item_name, flavor, total, delivery, info, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
+               (call.from_user.id, b, f, t, d, "Ожидаем данные InPost", "WAIT_DATA"))
     db.commit()
     db.close()
     
@@ -216,21 +217,23 @@ async def finish_callback(call: types.CallbackQuery):
 # --- ЧАСТЬ 7: ОБРАБОТКА ТЕКСТА (ДАННЫЕ INPOST И ПЕРЕСЫЛКА АДМИНУ) ---
 @dp.message(F.text, ~F.text.startswith("/"))
 async def text_handler(message: types.Message):
-    # Ищем последний заказ этого юзера
+    # ИГНОРИРУЕМ ТЕКСТ КНОПОК МЕНЮ
+    if message.text in ["☁️ Витрина", "📥 Мои заказы", "💰 Бонусы", "⭐️ Отзывы", "🤝 Поддержка"]:
+        return
+
     db = sqlite3.connect('cloude_base.db')
     cursor = db.cursor()
-    cursor.execute("SELECT order_id, item_name, flavor, total FROM orders WHERE user_id = ? ORDER BY date DESC LIMIT 1", (message.from_user.id,))
+    # Ищем только тот заказ, где мы РЕАЛЬНО ждем данные (статус WAIT_DATA)
+    cursor.execute("SELECT order_id, item_name, flavor, total FROM orders WHERE user_id = ? AND status = 'WAIT_DATA' ORDER BY date DESC LIMIT 1", (message.from_user.id,))
     order = cursor.fetchone()
     
     if order:
         order_id, item, flavor, total = order
-        # Обновляем инфо в базе
         cursor.execute("UPDATE orders SET info = ?, status = 'Данные получены' WHERE order_id = ?", (message.text, order_id))
         db.commit()
         
         await message.answer("✅ <b>Данные получены!</b>\nМенеджер проверит оплату и отправит твой заказ. Спасибо, что выбрал Cloude!")
         
-        # Уведомляем админа
         if ADMIN:
             admin_report = (
                 f"💰 <b>НОВЫЙ ЗАКАЗ (InPost)</b>\n"
