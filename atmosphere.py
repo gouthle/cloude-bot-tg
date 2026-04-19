@@ -47,7 +47,7 @@ STOCKS = {
     },
     "ELFLIQ Salt": {
         "flavors": ["Grape Cherry", "Blueberry Sour Raspberry", "Blueberry Lemon", "Watermelon", "Pina Colada"],
-        "photo": None,
+        "photo": "AgACAgIAAxkBAAICfGnlUOyZ0JA7KfcuGPo4vncBgBhpAAIqGWsboKkpS0545fr-HtvFAQADAgADeAADOwQ",
         "price": 45
     }
 }
