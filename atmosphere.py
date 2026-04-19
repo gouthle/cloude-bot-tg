@@ -38,7 +38,6 @@ bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 
 # --- ЧАСТЬ 4: АССОРТИМЕНТ ТОВАРОВ ---
-# (Определяем ДО init_db, так как _seed_stock использует STOCKS)
 STOCKS = {
     "VOZOL Salt": {
         "flavors": ["Strawberry Watermelon", "Kiwi Guava", "White Peach", "Berries"],
@@ -126,7 +125,6 @@ def init_db():
     ''')
     conn.commit()
     conn.close()
-    # Заполняем новые вкусы нулями если их ещё нет в таблице
     conn = sqlite3.connect('cloude_base.db')
     for brand, data in STOCKS.items():
         for flavor in data["flavors"]:
@@ -293,7 +291,7 @@ async def adm_stock_action(call: types.CallbackQuery):
         return await call.answer("⛔️ Нет доступа.", show_alert=True)
 
     parts = call.data.split("_")
-    action = parts[1]       # m, p, p5, r
+    action = parts[1]
     brand_idx = parts[2]
     flavor_idx = int(parts[3])
 
@@ -381,7 +379,6 @@ async def delivery_callback(call: types.CallbackQuery):
     except (IndexError, ValueError):
         return await call.answer("Ошибка: вкус не найден")
 
-    # Проверка на случай если пока выбирал — последний забрали
     if get_stock(brand_name, flavor) <= 0:
         await call.answer("😔 Только что разобрали! Выбери другой вкус.", show_alert=True)
         return
@@ -401,10 +398,11 @@ async def delivery_callback(call: types.CallbackQuery):
         callback_data=f"brn_{brand_idx}"
     ))
 
-    await call.message.edit_text(
-        f"📍 <b>Оформление:</b> {brand_name} — {flavor}\n\nВыбери способ получения:",
-        reply_markup=keyboard.as_markup()
-    )
+    text = f"📍 <b>Оформление:</b> {brand_name} — {flavor}\n\nВыбери способ получения:"
+
+    # FIX: удаляем фото-сообщение и отправляем текстовое
+    await call.message.delete()
+    await call.bot.send_message(call.from_user.id, text, reply_markup=keyboard.as_markup())
 
 
 @dp.callback_query(F.data.startswith("pay_"))
@@ -506,10 +504,12 @@ async def back_to_cats(call: types.CallbackQuery):
     for brand in BRAND_LIST:
         idx = brand_to_idx(brand)
         keyboard.row(types.InlineKeyboardButton(text=brand, callback_data=f"brn_{idx}"))
-    await call.message.edit_text(
-        "✨ <b>Каталог продукции</b>\nВыбери бренд:",
-        reply_markup=keyboard.as_markup()
-    )
+
+    text = "✨ <b>Каталог продукции</b>\nВыбери бренд:"
+
+    # FIX: удаляем фото-сообщение и отправляем текстовое
+    await call.message.delete()
+    await call.bot.send_message(call.from_user.id, text, reply_markup=keyboard.as_markup())
 
 
 # --- ЧАСТЬ 9: ОБРАБОТКА ТЕКСТА И ФОТО ---
@@ -577,7 +577,6 @@ async def confirm_order(call: types.CallbackQuery):
     parts = call.data.split("_")
     order_id, user_id = int(parts[1]), int(parts[2])
 
-    # Берём данные заказа для списания склада
     db = sqlite3.connect('cloude_base.db')
     row = db.execute(
         "SELECT item_name, flavor, status FROM orders WHERE order_id = ?", (order_id,)
@@ -599,7 +598,6 @@ async def confirm_order(call: types.CallbackQuery):
     db.commit()
     db.close()
 
-    # Списываем со склада только после подтверждения
     decrement_stock(item_name, flavor)
 
     await call.message.edit_text(
