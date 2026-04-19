@@ -459,14 +459,17 @@ async def finish_callback(call: types.CallbackQuery):
     delivery = "InPost" if delivery_code == "i" else "GRATIS"
 
     db = sqlite3.connect('cloude_base.db')
-    db.execute(
+    cur = db.cursor()
+    cur.execute(
         "INSERT INTO orders (user_id, item_name, flavor, total, delivery, info, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
         (call.from_user.id, brand_name, flavor, total, delivery, "Ожидаем данные InPost", "WAIT_DATA")
     )
+    order_id = cur.lastrowid
     db.commit()
     db.close()
 
-    decrement_stock(brand_name, flavor)
+    user_id = call.from_user.id
+    username = call.from_user.username or "без ника"
 
     if delivery == "InPost":
         await call.message.edit_text(
@@ -477,12 +480,20 @@ async def finish_callback(call: types.CallbackQuery):
         )
     else:
         if ADMIN:
+            kb = InlineKeyboardBuilder()
+            kb.row(
+                types.InlineKeyboardButton(text="✅ Оплата пришла", callback_data=f"confirm_{order_id}_{user_id}"),
+                types.InlineKeyboardButton(text="❌ Не пришла", callback_data=f"reject_{order_id}_{user_id}")
+            )
             await bot.send_message(
                 ADMIN,
                 f"⚡️ <b>НОВЫЙ ЗАКАЗ (GRATIS)</b>\n"
-                f"Юзер: @{call.from_user.username}\n"
-                f"Товар: {brand_name} {flavor}\n"
-                f"Сумма: {total}zł"
+                f"👤 @{username} (<code>{user_id}</code>)\n"
+                f"📦 {brand_name} — {flavor}\n"
+                f"💵 Сумма: <b>{total}zł</b>\n"
+                f"🚚 Доставка: {delivery}\n"
+                f"🆔 Заказ №{order_id}",
+                reply_markup=kb.as_markup()
             )
         await call.message.edit_text(
             "🚀 <b>Заказ принят!</b> Менеджер свяжется с тобой для передачи товара."
@@ -522,7 +533,7 @@ async def text_handler(message: types.Message):
     if order:
         order_id, item, flavor, total = order
         cursor.execute(
-            "UPDATE orders SET info = ?, status = 'Данные получены' WHERE order_id = ?",
+            "UPDATE orders SET info = ?, status = 'Ожидает подтверждения' WHERE order_id = ?",
             (message.text, order_id)
         )
         db.commit()
@@ -533,19 +544,107 @@ async def text_handler(message: types.Message):
         )
 
         if ADMIN:
+            user_id = message.from_user.id
+            username = message.from_user.username or "без ника"
+            kb = InlineKeyboardBuilder()
+            kb.row(
+                types.InlineKeyboardButton(text="✅ Оплата пришла", callback_data=f"confirm_{order_id}_{user_id}"),
+                types.InlineKeyboardButton(text="❌ Не пришла", callback_data=f"reject_{order_id}_{user_id}")
+            )
             await bot.send_message(
                 ADMIN,
                 f"💰 <b>НОВЫЙ ЗАКАЗ (InPost)</b>\n"
-                f"От: @{message.from_user.username}\n"
-                f"Товар: {item} - {flavor}\n"
-                f"Сумма: {total}zł\n"
-                f"Данные: {message.text}"
+                f"👤 @{username} (<code>{user_id}</code>)\n"
+                f"📦 {item} — {flavor}\n"
+                f"💵 Сумма: <b>{total}zł</b>\n"
+                f"🚚 Доставка: InPost\n"
+                f"📋 Данные: {message.text}\n"
+                f"🆔 Заказ №{order_id}",
+                reply_markup=kb.as_markup()
             )
     else:
         db.close()
         await message.answer(
             "Используй кнопки меню для заказа. Если есть вопросы — пиши в поддержку."
         )
+
+
+@dp.callback_query(F.data.startswith("confirm_"))
+async def confirm_order(call: types.CallbackQuery):
+    if call.from_user.id != ADMIN:
+        return await call.answer("⛔️ Нет доступа.", show_alert=True)
+
+    parts = call.data.split("_")
+    order_id, user_id = int(parts[1]), int(parts[2])
+
+    # Берём данные заказа для списания склада
+    db = sqlite3.connect('cloude_base.db')
+    row = db.execute(
+        "SELECT item_name, flavor, status FROM orders WHERE order_id = ?", (order_id,)
+    ).fetchone()
+
+    if not row:
+        db.close()
+        return await call.answer("Заказ не найден", show_alert=True)
+
+    item_name, flavor, status = row
+
+    if status == "Подтверждён":
+        db.close()
+        return await call.answer("Заказ уже подтверждён!", show_alert=True)
+
+    db.execute(
+        "UPDATE orders SET status = 'Подтверждён' WHERE order_id = ?", (order_id,)
+    )
+    db.commit()
+    db.close()
+
+    # Списываем со склада только после подтверждения
+    decrement_stock(item_name, flavor)
+
+    await call.message.edit_text(
+        call.message.text + "\n\n✅ <b>Подтверждено!</b> Склад обновлён."
+    )
+    await bot.send_message(
+        user_id,
+        "✅ <b>Оплата подтверждена!</b>\nТвой заказ принят в обработку. Скоро получишь трек-номер или свяжемся по деталям. 🚀"
+    )
+
+
+@dp.callback_query(F.data.startswith("reject_"))
+async def reject_order(call: types.CallbackQuery):
+    if call.from_user.id != ADMIN:
+        return await call.answer("⛔️ Нет доступа.", show_alert=True)
+
+    parts = call.data.split("_")
+    order_id, user_id = int(parts[1]), int(parts[2])
+
+    db = sqlite3.connect('cloude_base.db')
+    row = db.execute(
+        "SELECT status FROM orders WHERE order_id = ?", (order_id,)
+    ).fetchone()
+
+    if not row:
+        db.close()
+        return await call.answer("Заказ не найден", show_alert=True)
+
+    if row[0] == "Отклонён":
+        db.close()
+        return await call.answer("Заказ уже отклонён!", show_alert=True)
+
+    db.execute(
+        "UPDATE orders SET status = 'Отклонён' WHERE order_id = ?", (order_id,)
+    )
+    db.commit()
+    db.close()
+
+    await call.message.edit_text(
+        call.message.text + "\n\n❌ <b>Отклонено.</b> Склад не тронут."
+    )
+    await bot.send_message(
+        user_id,
+        "❌ <b>Оплата не найдена.</b>\nПроверь, правильно ли ты перевёл сумму. Если есть вопросы — напиши в поддержку 🤝"
+    )
 
 
 # --- ЗАПУСК ---
