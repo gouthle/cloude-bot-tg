@@ -73,17 +73,17 @@ def init_db():
     conn.commit()
     conn.close()
 
-# --- ЧАСТЬ 4: АССОРТИМЕНТ ТОВАРОВ ---
+# --- ЧАСТЬ 4: АССОРТИМЕНТ ТОВАРОВ (ИСПРАВЛЕНЫ КЛЮЧИ) ---
 STOCKS = {
-    "ELFLIQ Salt": {
-        "flavors": ["Blueberry Sour Raspberry", "Apple Peach", "Pink Lemonade", "Watermelon", "Kiwi Guava", "Cotton Candy"],
+    "Husky Double Ice": {
+        "flavors": ["Frosty Palm", "Explosive Bait", "Sour Beast", "Wolfberry"],
         "photo": None
     },
     "ELFLIQ Salt": {
-        "flavors": ["Double Apple", "Apple Peach", "Pink Lemonade", "Watermelon", "Kiwi Guava", "Cotton Candy"],
+        "flavors": ["Blueberry Sour", "Apple Peach", "Pink Lemonade", "Watermelon", "Kiwi Guava"],
         "photo": None
     },
-    "VOZOL Salt": {
+    "VOZOL 10000": {
         "flavors": ["Mixed Berries", "Watermelon Ice", "Grape Ice", "Miami Mint", "Sour Apple", "Peach Ice"],
         "photo": None
     }
@@ -143,77 +143,83 @@ async def brands_callback(call: types.CallbackQuery):
         brands = ["VOZOL 10000"]
         
     for brand in brands:
-        keyboard.row(types.InlineKeyboardButton(text=brand, callback_data=f"brand_{brand}"))
+        # Сократил префикс до brn_ чтобы влезть в лимит CallbackData
+        keyboard.row(types.InlineKeyboardButton(text=brand, callback_data=f"brn_{brand}"))
     
     keyboard.row(types.InlineKeyboardButton(text="⬅️ Назад к категориям", callback_data="back_to_cats"))
     await call.message.edit_text("🔥 <b>Доступные бренды:</b>", reply_markup=keyboard.as_markup())
 
-@dp.callback_query(F.data.startswith("brand_"))
+@dp.callback_query(F.data.startswith("brn_"))
 async def flavors_callback(call: types.CallbackQuery):
-    brand_name = call.data.split("_")[1]
+    brand_name = call.data.split("_", 1)[1]
     brand_data = STOCKS.get(brand_name)
     keyboard = InlineKeyboardBuilder()
     
-    for flavor in brand_data["flavors"]:
-        keyboard.row(types.InlineKeyboardButton(text=flavor, callback_data=f"select_{brand_name}_{flavor}_45"))
+    if brand_data:
+        for flavor in brand_data["flavors"]:
+            # Сократил до sl_ чтобы избежать ошибки лимита символов в кнопке
+            keyboard.row(types.InlineKeyboardButton(text=flavor, callback_data=f"sl_{brand_name[:5]}_{flavor[:10]}_45"))
     
     # Кнопка возврата
-    prev_cat = "cat_liq" if brand_name != "VOZOL 10000" else "cat_disp"
+    prev_cat = "cat_liq" if "VOZOL" not in brand_name else "cat_disp"
     keyboard.row(types.InlineKeyboardButton(text="⬅️ Назад к брендам", callback_data=prev_cat))
     
-    if brand_data["photo"]:
+    if brand_data and brand_data["photo"]:
         await call.message.delete()
         await call.bot.send_photo(call.from_user.id, brand_data["photo"], caption=f"🍒 <b>Вкусы {brand_name}:</b>", reply_markup=keyboard.as_markup())
     else:
         await call.message.edit_text(f"🍒 <b>Вкусы {brand_name}:</b>\nВыбирай свой вариант:", reply_markup=keyboard.as_markup())
 
-@dp.callback_query(F.data.startswith("select_"))
+@dp.callback_query(F.data.startswith("sl_"))
 async def delivery_callback(call: types.CallbackQuery):
     _, brand, flavor, price = call.data.split("_")
     keyboard = InlineKeyboardBuilder()
     
-    keyboard.row(types.InlineKeyboardButton(text="📦 InPost (+14zł)", callback_data=f"pay_{brand}_{flavor}_{int(price)+14}_InPost"))
-    keyboard.row(types.InlineKeyboardButton(text="🤝 Inpost GRATIS (От 5 штук.)", callback_data=f"pay_{brand}_{flavor}_{price}_Pickup"))
-    keyboard.row(types.InlineKeyboardButton(text="⬅️ Назад к вкусам", callback_data=f"brand_{brand}"))
+    keyboard.row(types.InlineKeyboardButton(text="📦 InPost (+14zł)", callback_data=f"pay_i_{brand}_{flavor}_{int(price)+14}"))
+    keyboard.row(types.InlineKeyboardButton(text="🤝 Inpost GRATIS (От 5 штук.)", callback_data=f"pay_g_{brand}_{flavor}_{price}"))
+    keyboard.row(types.InlineKeyboardButton(text="⬅️ Назад к вкусам", callback_data=f"brn_{brand}"))
     
     await call.message.answer(f"📍 <b>Оформление:</b> {brand} — {flavor}\n\nВыбери способ получения:", reply_markup=keyboard.as_markup())
     await call.message.delete()
 
 @dp.callback_query(F.data.startswith("pay_"))
 async def payment_callback(call: types.CallbackQuery):
-    _, brand, flavor, total, delivery = call.data.split("_")
+    data = call.data.split("_")
+    delivery_type = "InPost" if data[1] == "i" else "GRATIS"
+    brand, flavor, total = data[2], data[3], data[4]
     
     pay_text = (
         f"💳 <b>Оплата заказа</b>\n\n"
         f"Товар: {brand} ({flavor})\n"
-        f"Способ: {delivery}\n"
+        f"Способ: {delivery_type}\n"
         f"<b>Сумма к оплате: {total}zł</b>\n\n"
         f"Переведи ровную сумму по BLIK на номер:\n<code>{PHONE_NUMBER}</code>\n\n"
         "После совершения платежа обязательно нажми кнопку ниже!"
     )
     
     keyboard = InlineKeyboardBuilder()
-    keyboard.row(types.InlineKeyboardButton(text="✅ Я оплатил(а)", callback_data=f"finish_{brand}_{flavor}_{total}_{delivery}"))
+    keyboard.row(types.InlineKeyboardButton(text="✅ Я оплатил(а)", callback_data=f"fin_{brand}_{flavor}_{total}_{delivery_type[:1]}"))
     keyboard.row(types.InlineKeyboardButton(text="❌ Отменить", callback_data="back_to_cats"))
     
     await call.message.edit_text(pay_text, reply_markup=keyboard.as_markup())
 
-@dp.callback_query(F.data.startswith("finish_"))
+@dp.callback_query(F.data.startswith("fin_"))
 async def finish_callback(call: types.CallbackQuery):
-    _, b, f, t, d = call.data.split("_")
+    _, b, f, t, d_code = call.data.split("_")
+    delivery = "InPost" if d_code == "I" else "GRATIS"
     
     db = sqlite3.connect('cloude_base.db')
     db.execute("INSERT INTO orders (user_id, item_name, flavor, total, delivery, info, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
-               (call.from_user.id, b, f, t, d, "Ожидаем данные InPost", "WAIT_DATA"))
+               (call.from_user.id, b, f, t, delivery, "Ожидаем данные InPost", "WAIT_DATA"))
     db.commit()
     db.close()
     
-    if d == "InPost":
+    if delivery == "InPost":
         instruction = "📝 <b>Важно!</b>\nПришли следующим сообщением данные для InPost:\n1. Твои ФИО\n2. Номер телефона\n3. Код пачкомата (напр. KRA01M)"
         await call.message.answer(instruction)
     else:
         if ADMIN:
-            await bot.send_message(ADMIN, f"⚡️ <b>НОВЫЙ ЗАКАЗ (САМОВЫВОЗ)</b>\nЮзер: @{call.from_user.username}\nТовар: {b} {f}\nСумма: {t}zł")
+            await bot.send_message(ADMIN, f"⚡️ <b>НОВЫЙ ЗАКАЗ (GRATIS)</b>\nЮзер: @{call.from_user.username}\nТовар: {b} {f}\nСумма: {t}zł")
         await call.message.answer("🚀 <b>Заказ принят!</b> Менеджер свяжется с тобой для передачи товара.")
 
 # --- ЧАСТЬ 7: ОБРАБОТКА ТЕКСТА (ДАННЫЕ INPOST И ПЕРЕСЫЛКА АДМИНУ) ---
@@ -282,10 +288,11 @@ async def support_handler(message: types.Message):
 
 @dp.callback_query(F.data == "back_to_cats")
 async def back_to_cats(call: types.CallbackQuery):
+    # Исправил вызов функции, чтобы возвращало в начало каталога
     keyboard = InlineKeyboardBuilder()
-    keyboard.row(types.InlineKeyboardButton(text="🧂 Жидкости", callback_data="cat_liq"))
-    keyboard.row(types.InlineKeyboardButton(text="💨 Одноразки", callback_data="cat_disp"))
-    await call.message.edit_text("✨ <b>Каталог Cloude</b>", reply_markup=keyboard.as_markup())
+    keyboard.row(types.InlineKeyboardButton(text="🧂 Жидкости (Husky, Elfliq)", callback_data="cat_liq"))
+    keyboard.row(types.InlineKeyboardButton(text="💨 Одноразки (Vozol)", callback_data="cat_disp"))
+    await call.message.edit_text("✨ <b>Каталог продукции</b>\nВыбери нужную категорию:", reply_markup=keyboard.as_markup())
 
 @dp.message(F.photo)
 async def photo_id_helper(message: types.Message):
