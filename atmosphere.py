@@ -5,7 +5,7 @@ import sqlite3
 import threading
 from flask import Flask
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, Command
 from aiogram.types import BotCommand
 from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
 from aiogram.utils.deep_linking import create_start_link
@@ -29,11 +29,7 @@ logging.basicConfig(level=logging.INFO)
 
 TOKEN = os.getenv('BOT_TOKEN')
 ADMIN_ID_ENV = os.getenv('ADMIN_ID')
-
-if ADMIN_ID_ENV:
-    ADMIN = int(ADMIN_ID_ENV)
-else:
-    ADMIN = None
+ADMIN = int(ADMIN_ID_ENV) if ADMIN_ID_ENV else None
 
 PHONE_NUMBER = "+48 123 456 789"  # ЗАМЕНИ НА СВОЙ НОМЕР BLIK
 REVIEWS_URL = "https://t.me/+cbqxYZH0tzE4MDUy"
@@ -41,7 +37,62 @@ REVIEWS_URL = "https://t.me/+cbqxYZH0tzE4MDUy"
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 
+# --- ЧАСТЬ 4: АССОРТИМЕНТ ТОВАРОВ ---
+# (Определяем ДО init_db, так как _seed_stock использует STOCKS)
+STOCKS = {
+    "VOZOL Salt": {
+        "flavors": ["Strawberry Watermelon", "Kiwi Guava", "White Peach", "Berries"],
+        "photo": None,  # Сюда вставь file_id после получения от бота
+        "price": 45
+    },
+    "ELFLIQ Salt": {
+        "flavors": ["Grape Cherry", "Blueberry Sour Raspberry", "Blueberry Lemon", "Watermelon", "Pina Colada"],
+        "photo": None,
+        "price": 45
+    }
+}
+
+BRAND_LIST = list(STOCKS.keys())
+
+def brand_to_idx(brand_name: str) -> str:
+    try:
+        return str(BRAND_LIST.index(brand_name))
+    except ValueError:
+        return "0"
+
+def idx_to_brand(idx: str) -> str:
+    try:
+        return BRAND_LIST[int(idx)]
+    except (ValueError, IndexError):
+        return BRAND_LIST[0]
+
 # --- ЧАСТЬ 3: РАБОТА С БАЗОЙ ДАННЫХ ---
+def get_stock(brand: str, flavor: str) -> int:
+    conn = sqlite3.connect('cloude_base.db')
+    row = conn.execute(
+        "SELECT quantity FROM stock WHERE brand = ? AND flavor = ?", (brand, flavor)
+    ).fetchone()
+    conn.close()
+    return row[0] if row else 0
+
+def set_stock(brand: str, flavor: str, quantity: int):
+    conn = sqlite3.connect('cloude_base.db')
+    conn.execute(
+        "INSERT OR REPLACE INTO stock (brand, flavor, quantity) VALUES (?, ?, ?)",
+        (brand, flavor, quantity)
+    )
+    conn.commit()
+    conn.close()
+
+def decrement_stock(brand: str, flavor: str):
+    conn = sqlite3.connect('cloude_base.db')
+    conn.execute(
+        "UPDATE stock SET quantity = MAX(0, quantity - 1) WHERE brand = ? AND flavor = ?",
+        (brand, flavor)
+    )
+    conn.commit()
+    conn.close()
+
 def init_db():
     conn = sqlite3.connect('cloude_base.db')
     cur = conn.cursor()
@@ -65,45 +116,33 @@ def init_db():
             date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS stock (
+            brand TEXT,
+            flavor TEXT,
+            quantity INTEGER DEFAULT 0,
+            PRIMARY KEY (brand, flavor)
+        )
+    ''')
     conn.commit()
     conn.close()
-
-# --- ЧАСТЬ 4: АССОРТИМЕНТ ТОВАРОВ ---
-STOCKS = {
-    "VOZOL Salt": {
-        "flavors": ["Strawberry Watermelon", "Kiwi Guava", "White Peach", "Berries"],
-        "photo": AgACAgIAAxkBAAICbmnlTR8eWQcAATCwLgAB4Qpan_dwJF4AAiIZaxugqSlLvokeaQm4iO8BAAMCAAN3AAM7BA,  # Сюда вставь file_id фото после получения от бота
-        "price": 45
-    },
-    "ELFLIQ Salt": {
-        "flavors": ["Grape Cherry", "Blueberry Sour Raspberry", "Blueberry Lemon", "Watermelon", "Pina Colada"],
-        "photo": None,
-        "price": 45
-    }
-}
-
-# Список брендов в порядке индексов — для восстановления полного имени из короткого callback
-BRAND_LIST = list(STOCKS.keys())
-
-def brand_to_idx(brand_name: str) -> str:
-    """Возвращает строковый индекс бренда (0, 1, 2...)"""
-    try:
-        return str(BRAND_LIST.index(brand_name))
-    except ValueError:
-        return "0"
-
-def idx_to_brand(idx: str) -> str:
-    """Возвращает полное имя бренда по индексу"""
-    try:
-        return BRAND_LIST[int(idx)]
-    except (ValueError, IndexError):
-        return BRAND_LIST[0]
+    # Заполняем новые вкусы нулями если их ещё нет в таблице
+    conn = sqlite3.connect('cloude_base.db')
+    for brand, data in STOCKS.items():
+        for flavor in data["flavors"]:
+            conn.execute(
+                "INSERT OR IGNORE INTO stock (brand, flavor, quantity) VALUES (?, ?, 0)",
+                (brand, flavor)
+            )
+    conn.commit()
+    conn.close()
 
 # --- ЧАСТЬ 5: КНОПКИ МЕНЮ ---
 async def set_main_menu_button(bot: Bot):
     commands = [
         BotCommand(command='/start', description='Главное меню / Запуск'),
-        BotCommand(command='/help', description='Помощь и поддержка')
+        BotCommand(command='/help', description='Помощь и поддержка'),
+        BotCommand(command='/admin', description='Админ-панель (только для админа)'),
     ]
     await bot.set_my_commands(commands)
 
@@ -114,7 +153,7 @@ def get_main_keyboard():
     builder.row(types.KeyboardButton(text="🤝 Поддержка"))
     return builder.as_markup(resize_keyboard=True)
 
-# --- ЧАСТЬ 6: ОБРАБОТКА КНОПОК МЕНЮ (ДОЛЖНЫ БЫТЬ ВЫШЕ text_handler!) ---
+# --- ЧАСТЬ 6: ХЕНДЛЕРЫ МЕНЮ ---
 
 @dp.message(CommandStart())
 async def start_handler(message: types.Message):
@@ -185,13 +224,110 @@ async def support_handler(message: types.Message):
     await message.answer("Связь с менеджером: @твой_ник\nПиши по любым вопросам! 🚀")
 
 
-# --- ЧАСТЬ 7: INLINE CALLBACK ХЕНДЛЕРЫ ---
+# --- ЧАСТЬ 7: АДМИН-ПАНЕЛЬ СКЛАДА ---
+
+def get_admin_stock_keyboard(brand_idx: str):
+    brand_name = idx_to_brand(brand_idx)
+    brand_data = STOCKS.get(brand_name, {})
+    keyboard = InlineKeyboardBuilder()
+
+    for i, flavor in enumerate(brand_data.get("flavors", [])):
+        qty = get_stock(brand_name, flavor)
+        status = f"✅ {qty} шт." if qty > 0 else "❌ Sold Out"
+        keyboard.row(
+            types.InlineKeyboardButton(text=f"{flavor} — {status}", callback_data="noop")
+        )
+        keyboard.row(
+            types.InlineKeyboardButton(text="➖1", callback_data=f"adm_m_{brand_idx}_{i}"),
+            types.InlineKeyboardButton(text="➕1", callback_data=f"adm_p_{brand_idx}_{i}"),
+            types.InlineKeyboardButton(text="➕5", callback_data=f"adm_p5_{brand_idx}_{i}"),
+            types.InlineKeyboardButton(text="🔄 Сброс", callback_data=f"adm_r_{brand_idx}_{i}"),
+        )
+
+    keyboard.row(types.InlineKeyboardButton(text="⬅️ К брендам", callback_data="adm_brands"))
+    return keyboard.as_markup()
+
+def get_admin_brands_keyboard():
+    keyboard = InlineKeyboardBuilder()
+    for brand in BRAND_LIST:
+        idx = brand_to_idx(brand)
+        keyboard.row(types.InlineKeyboardButton(text=f"📦 {brand}", callback_data=f"adm_b_{idx}"))
+    return keyboard.as_markup()
+
+@dp.message(Command("admin"))
+async def admin_panel(message: types.Message):
+    if message.from_user.id != ADMIN:
+        return await message.answer("⛔️ Нет доступа.")
+    await message.answer(
+        "⚙️ <b>Админ-панель — Управление складом</b>\n\nВыбери бренд:",
+        reply_markup=get_admin_brands_keyboard()
+    )
+
+@dp.callback_query(F.data == "adm_brands")
+async def adm_brands(call: types.CallbackQuery):
+    if call.from_user.id != ADMIN:
+        return await call.answer("⛔️ Нет доступа.", show_alert=True)
+    await call.message.edit_text(
+        "⚙️ <b>Админ-панель — Управление складом</b>\n\nВыбери бренд:",
+        reply_markup=get_admin_brands_keyboard()
+    )
+
+@dp.callback_query(F.data.startswith("adm_b_"))
+async def adm_brand_stock(call: types.CallbackQuery):
+    if call.from_user.id != ADMIN:
+        return await call.answer("⛔️ Нет доступа.", show_alert=True)
+    brand_idx = call.data.split("_")[2]
+    brand_name = idx_to_brand(brand_idx)
+    await call.message.edit_text(
+        f"⚙️ <b>Склад — {brand_name}</b>\n\nУправляй остатками:",
+        reply_markup=get_admin_stock_keyboard(brand_idx)
+    )
+
+@dp.callback_query(F.data == "noop")
+async def noop_handler(call: types.CallbackQuery):
+    await call.answer()
+
+@dp.callback_query(F.data.startswith("adm_"))
+async def adm_stock_action(call: types.CallbackQuery):
+    if call.from_user.id != ADMIN:
+        return await call.answer("⛔️ Нет доступа.", show_alert=True)
+
+    parts = call.data.split("_")
+    action = parts[1]       # m, p, p5, r
+    brand_idx = parts[2]
+    flavor_idx = int(parts[3])
+
+    brand_name = idx_to_brand(brand_idx)
+    flavors = STOCKS.get(brand_name, {}).get("flavors", [])
+
+    if flavor_idx >= len(flavors):
+        return await call.answer("Ошибка: вкус не найден")
+
+    flavor = flavors[flavor_idx]
+    current = get_stock(brand_name, flavor)
+
+    if action == "m":
+        new_qty = max(0, current - 1)
+    elif action == "p":
+        new_qty = current + 1
+    elif action == "p5":
+        new_qty = current + 5
+    elif action == "r":
+        new_qty = 0
+    else:
+        return await call.answer("Неизвестное действие")
+
+    set_stock(brand_name, flavor, new_qty)
+
+    status = f"✅ {new_qty} шт." if new_qty > 0 else "❌ Sold Out"
+    await call.answer(f"{flavor}: {status}")
+    await call.message.edit_reply_markup(reply_markup=get_admin_stock_keyboard(brand_idx))
 
 
+# --- ЧАСТЬ 8: ВИТРИНА — INLINE CALLBACKS ---
 
 @dp.callback_query(F.data.startswith("brn_"))
 async def flavors_callback(call: types.CallbackQuery):
-    # callback_data: brn_{brand_idx}
     brand_idx = call.data.split("_", 1)[1]
     brand_name = idx_to_brand(brand_idx)
     brand_data = STOCKS.get(brand_name)
@@ -200,14 +336,19 @@ async def flavors_callback(call: types.CallbackQuery):
     if brand_data:
         for i, flavor in enumerate(brand_data["flavors"]):
             price = brand_data["price"]
-            # callback_data: sl_{brand_idx}_{flavor_idx}_{price}
-            keyboard.row(types.InlineKeyboardButton(
-                text=flavor,
-                callback_data=f"sl_{brand_idx}_{i}_{price}"
-            ))
+            qty = get_stock(brand_name, flavor)
+            if qty > 0:
+                keyboard.row(types.InlineKeyboardButton(
+                    text=f"{flavor} ({qty} шт.)",
+                    callback_data=f"sl_{brand_idx}_{i}_{price}"
+                ))
+            else:
+                keyboard.row(types.InlineKeyboardButton(
+                    text=f"❌ {flavor} — Sold Out",
+                    callback_data="soldout"
+                ))
 
     keyboard.row(types.InlineKeyboardButton(text="⬅️ Назад к каталогу", callback_data="back_to_cats"))
-
     caption = f"🍒 <b>Вкусы {brand_name}:</b>\nВыбирай свой вариант:"
 
     if brand_data and brand_data["photo"]:
@@ -222,20 +363,27 @@ async def flavors_callback(call: types.CallbackQuery):
         await call.message.edit_text(caption, reply_markup=keyboard.as_markup())
 
 
+@dp.callback_query(F.data == "soldout")
+async def soldout_handler(call: types.CallbackQuery):
+    await call.answer("😔 Этого вкуса нет в наличии. Выбери другой!", show_alert=True)
+
+
 @dp.callback_query(F.data.startswith("sl_"))
 async def delivery_callback(call: types.CallbackQuery):
-    # callback_data: sl_{brand_idx}_{flavor_idx}_{price}
     parts = call.data.split("_")
     brand_idx, flavor_idx, price = parts[1], parts[2], parts[3]
 
     brand_name = idx_to_brand(brand_idx)
-    brand_data = STOCKS.get(brand_name, {})
-    flavors = brand_data.get("flavors", [])
+    flavors = STOCKS.get(brand_name, {}).get("flavors", [])
 
     try:
         flavor = flavors[int(flavor_idx)]
     except (IndexError, ValueError):
-        await call.answer("Ошибка: вкус не найден")
+        return await call.answer("Ошибка: вкус не найден")
+
+    # Проверка на случай если пока выбирал — последний забрали
+    if get_stock(brand_name, flavor) <= 0:
+        await call.answer("😔 Только что разобрали! Выбери другой вкус.", show_alert=True)
         return
 
     price_int = int(price)
@@ -261,20 +409,17 @@ async def delivery_callback(call: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("pay_"))
 async def payment_callback(call: types.CallbackQuery):
-    # callback_data: pay_{i|g}_{brand_idx}_{flavor_idx}_{total}
     parts = call.data.split("_")
     delivery_code = parts[1]
     brand_idx, flavor_idx, total = parts[2], parts[3], parts[4]
 
     brand_name = idx_to_brand(brand_idx)
-    brand_data = STOCKS.get(brand_name, {})
-    flavors = brand_data.get("flavors", [])
+    flavors = STOCKS.get(brand_name, {}).get("flavors", [])
 
     try:
         flavor = flavors[int(flavor_idx)]
     except (IndexError, ValueError):
-        await call.answer("Ошибка: вкус не найден")
-        return
+        return await call.answer("Ошибка: вкус не найден")
 
     delivery_type = "InPost" if delivery_code == "i" else "GRATIS"
 
@@ -299,20 +444,17 @@ async def payment_callback(call: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("fin_"))
 async def finish_callback(call: types.CallbackQuery):
-    # callback_data: fin_{i|g}_{brand_idx}_{flavor_idx}_{total}
     parts = call.data.split("_")
     delivery_code = parts[1]
     brand_idx, flavor_idx, total = parts[2], parts[3], parts[4]
 
     brand_name = idx_to_brand(brand_idx)
-    brand_data = STOCKS.get(brand_name, {})
-    flavors = brand_data.get("flavors", [])
+    flavors = STOCKS.get(brand_name, {}).get("flavors", [])
 
     try:
         flavor = flavors[int(flavor_idx)]
     except (IndexError, ValueError):
-        await call.answer("Ошибка: вкус не найден")
-        return
+        return await call.answer("Ошибка: вкус не найден")
 
     delivery = "InPost" if delivery_code == "i" else "GRATIS"
 
@@ -324,14 +466,15 @@ async def finish_callback(call: types.CallbackQuery):
     db.commit()
     db.close()
 
+    decrement_stock(brand_name, flavor)
+
     if delivery == "InPost":
-        instruction = (
+        await call.message.edit_text(
             "📝 <b>Важно!</b>\nПришли следующим сообщением данные для InPost:\n"
             "1. Твои ФИО\n"
             "2. Номер телефона\n"
             "3. Код пачкомата (напр. KRA01M)"
         )
-        await call.message.edit_text(instruction)
     else:
         if ADMIN:
             await bot.send_message(
@@ -358,8 +501,7 @@ async def back_to_cats(call: types.CallbackQuery):
     )
 
 
-# --- ЧАСТЬ 8: ОБРАБОТКА ТЕКСТА (ДАННЫЕ INPOST) ---
-# ВАЖНО: этот хендлер ПОСЛЕДНИЙ среди текстовых, иначе перехватит кнопки меню
+# --- ЧАСТЬ 9: ОБРАБОТКА ТЕКСТА И ФОТО ---
 
 @dp.message(F.photo)
 async def photo_id_helper(message: types.Message):
@@ -391,14 +533,14 @@ async def text_handler(message: types.Message):
         )
 
         if ADMIN:
-            admin_report = (
+            await bot.send_message(
+                ADMIN,
                 f"💰 <b>НОВЫЙ ЗАКАЗ (InPost)</b>\n"
                 f"От: @{message.from_user.username}\n"
                 f"Товар: {item} - {flavor}\n"
                 f"Сумма: {total}zł\n"
                 f"Данные: {message.text}"
             )
-            await bot.send_message(ADMIN, admin_report)
     else:
         db.close()
         await message.answer(
