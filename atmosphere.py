@@ -75,15 +75,15 @@ def init_db():
 
 # --- ЧАСТЬ 4: АССОРТИМЕНТ ТОВАРОВ ---
 STOCKS = {
-    "Husky Double Ice": {
-        "flavors": ["Frosty Palm", "Wolfberry", "Chilly Kiwi", "Blueberry", "Explosive Red", "Arctic Strike"],
-        "photo": None
-    },
     "ELFLIQ Salt": {
         "flavors": ["Blueberry Sour Raspberry", "Apple Peach", "Pink Lemonade", "Watermelon", "Kiwi Guava", "Cotton Candy"],
         "photo": None
     },
-    "VOZOL 10000": {
+    "ELFLIQ Salt": {
+        "flavors": ["Double Apple", "Apple Peach", "Pink Lemonade", "Watermelon", "Kiwi Guava", "Cotton Candy"],
+        "photo": None
+    },
+    "VOZOL Salt": {
         "flavors": ["Mixed Berries", "Watermelon Ice", "Grape Ice", "Miami Mint", "Sour Apple", "Peach Ice"],
         "photo": None
     }
@@ -119,7 +119,7 @@ async def start_handler(message: types.Message):
     db.close()
     
     welcome_text = (
-        f"Здарова, <b>{message.from_user.first_name}</b>! 👋\n\n"
+        f"Salute, <b>{message.from_user.first_name}</b>! 👋\n\n"
         "Ты попал в <b>Cloude Atmosphere</b>. Самое лучшее качество у нас!\n\n"
         "Пользуйся меню снизу, чтобы сделать заказ. Если возникнут вопросы — жми 'Поддержка'."
     )
@@ -173,7 +173,7 @@ async def delivery_callback(call: types.CallbackQuery):
     keyboard = InlineKeyboardBuilder()
     
     keyboard.row(types.InlineKeyboardButton(text="📦 InPost (+14zł)", callback_data=f"pay_{brand}_{flavor}_{int(price)+14}_InPost"))
-    keyboard.row(types.InlineKeyboardButton(text="🤝 Самовывоз Краков (Free)", callback_data=f"pay_{brand}_{flavor}_{price}_Pickup"))
+    keyboard.row(types.InlineKeyboardButton(text="🤝 Inpost GRATIS (От 5 штук.)", callback_data=f"pay_{brand}_{flavor}_{price}_Pickup"))
     keyboard.row(types.InlineKeyboardButton(text="⬅️ Назад к вкусам", callback_data=f"brand_{brand}"))
     
     await call.message.answer(f"📍 <b>Оформление:</b> {brand} — {flavor}\n\nВыбери способ получения:", reply_markup=keyboard.as_markup())
