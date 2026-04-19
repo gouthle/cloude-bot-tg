@@ -72,7 +72,7 @@ def init_db():
 STOCKS = {
     "VOZOL Salt": {
         "flavors": ["Strawberry Watermelon", "Kiwi Guava", "White Peach", "Berries"],
-        "photo": None,  # Сюда вставь file_id фото после получения от бота
+        "photo": AgACAgIAAxkBAAICbmnlTR8eWQcAATCwLgAB4Qpan_dwJF4AAiIZaxugqSlLvokeaQm4iO8BAAMCAAN3AAM7BA,  # Сюда вставь file_id фото после получения от бота
         "price": 45
     },
     "ELFLIQ Salt": {
