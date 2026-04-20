@@ -1,8 +1,9 @@
 import asyncio
 import os
 import logging
-import sqlite3
 import threading
+import psycopg2
+import psycopg2.extras
 from flask import Flask
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart, Command
@@ -31,18 +32,213 @@ TOKEN = os.getenv('BOT_TOKEN')
 ADMIN_ID_ENV = os.getenv('ADMIN_ID')
 ADMIN = int(ADMIN_ID_ENV) if ADMIN_ID_ENV else None
 
-# ID канала с отзывами (добавь в .env как REVIEWS_CHANNEL_ID=-100xxxxxxxxxx)
 REVIEWS_CHANNEL_ID_ENV = os.getenv('REVIEWS_CHANNEL_ID')
 REVIEWS_CHANNEL_ID = int(REVIEWS_CHANNEL_ID_ENV) if REVIEWS_CHANNEL_ID_ENV else None
 
-PHONE_NUMBER = "+48 123 456 789"  # ЗАМЕНИ НА СВОЙ НОМЕР BLIK
+DATABASE_URL = os.getenv('DATABASE_URL')  # Подключение к Supabase
+
+PHONE_NUMBER = "+48 123 456 789"
 REVIEWS_URL = "https://t.me/+cbqxYZH0tzE4MDUy"
 
-REFERRAL_BONUS = 5       # Бонус за приглашённого друга (zł)
-LOW_STOCK_THRESHOLD = 2  # Уведомление при остатке <= этого значения
+REFERRAL_BONUS = 5
+LOW_STOCK_THRESHOLD = 2
 
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
+
+# --- ЧАСТЬ 3: РАБОТА С БАЗОЙ ДАННЫХ (PostgreSQL) ---
+
+def get_conn():
+    return psycopg2.connect(DATABASE_URL, sslmode='require')
+
+def get_stock(brand: str, flavor: str) -> int:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT quantity FROM stock WHERE brand = %s AND flavor = %s", (brand, flavor))
+    row = cur.fetchone()
+    conn.close()
+    return row[0] if row else 0
+
+def set_stock(brand: str, flavor: str, quantity: int):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO stock (brand, flavor, quantity) VALUES (%s, %s, %s) "
+        "ON CONFLICT (brand, flavor) DO UPDATE SET quantity = EXCLUDED.quantity",
+        (brand, flavor, quantity)
+    )
+    conn.commit()
+    conn.close()
+
+def decrement_stock(brand: str, flavor: str) -> int:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE stock SET quantity = GREATEST(0, quantity - 1) WHERE brand = %s AND flavor = %s",
+        (brand, flavor)
+    )
+    conn.commit()
+    cur.execute("SELECT quantity FROM stock WHERE brand = %s AND flavor = %s", (brand, flavor))
+    row = cur.fetchone()
+    conn.close()
+    return row[0] if row else 0
+
+def get_balance(user_id: int) -> int:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT balance FROM users WHERE user_id = %s", (user_id,))
+    row = cur.fetchone()
+    conn.close()
+    return row[0] if row else 0
+
+def add_balance(user_id: int, amount: int):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET balance = balance + %s WHERE user_id = %s", (amount, user_id))
+    conn.commit()
+    conn.close()
+
+def spend_balance(user_id: int, amount: int):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET balance = GREATEST(0, balance - %s) WHERE user_id = %s", (amount, user_id))
+    conn.commit()
+    conn.close()
+
+def get_all_user_ids() -> list:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT user_id FROM users")
+    rows = cur.fetchall()
+    conn.close()
+    return [r[0] for r in rows]
+
+def collect_exists(user_id: int) -> bool:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM pending_collect WHERE user_id = %s", (user_id,))
+    row = cur.fetchone()
+    conn.close()
+    return row is not None
+
+def get_collect(user_id: int) -> dict | None:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT order_id, step, name, phone, email, paczkomat FROM pending_collect WHERE user_id = %s",
+        (user_id,)
+    )
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {"order_id": row[0], "step": row[1], "name": row[2],
+            "phone": row[3], "email": row[4], "paczkomat": row[5]}
+
+def set_collect(user_id: int, data: dict):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO pending_collect (user_id, order_id, step, name, phone, email, paczkomat) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s) "
+        "ON CONFLICT (user_id) DO UPDATE SET order_id=EXCLUDED.order_id, step=EXCLUDED.step, "
+        "name=EXCLUDED.name, phone=EXCLUDED.phone, email=EXCLUDED.email, paczkomat=EXCLUDED.paczkomat",
+        (user_id, data.get("order_id"), data.get("step", "name"),
+         data.get("name", ""), data.get("phone", ""), data.get("email", ""), data.get("paczkomat", ""))
+    )
+    conn.commit()
+    conn.close()
+
+def delete_collect(user_id: int):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM pending_collect WHERE user_id = %s", (user_id,))
+    conn.commit()
+    conn.close()
+
+def init_db():
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id BIGINT PRIMARY KEY,
+            username TEXT,
+            referrer_id BIGINT,
+            balance INTEGER DEFAULT 0
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS orders (
+            order_id SERIAL PRIMARY KEY,
+            user_id BIGINT,
+            item_name TEXT,
+            flavor TEXT,
+            total INTEGER,
+            delivery TEXT,
+            info TEXT,
+            status TEXT DEFAULT 'Ожидает оплаты',
+            track_number TEXT DEFAULT NULL,
+            photo_id TEXT DEFAULT NULL,
+            date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS stock (
+            brand TEXT,
+            flavor TEXT,
+            quantity INTEGER DEFAULT 0,
+            PRIMARY KEY (brand, flavor)
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS referrals (
+            referrer_id BIGINT,
+            referred_id BIGINT PRIMARY KEY
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS pending_collect (
+            user_id BIGINT PRIMARY KEY,
+            order_id INTEGER,
+            step TEXT,
+            name TEXT DEFAULT '',
+            phone TEXT DEFAULT '',
+            email TEXT DEFAULT '',
+            paczkomat TEXT DEFAULT ''
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS reviews (
+            review_id SERIAL PRIMARY KEY,
+            user_id BIGINT,
+            username TEXT,
+            order_id INTEGER,
+            item_name TEXT,
+            flavor TEXT,
+            rating INTEGER,
+            text TEXT DEFAULT NULL,
+            date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    conn.commit()
+
+    # Инициализация склада (только новые позиции)
+    for brand, data in STOCKS.items():
+        for flavor in data["flavors"]:
+            cur.execute(
+                "INSERT INTO stock (brand, flavor, quantity) VALUES (%s, %s, 0) "
+                "ON CONFLICT (brand, flavor) DO NOTHING",
+                (brand, flavor)
+            )
+    conn.commit()
+    conn.close()
 
 # --- ЧАСТЬ 4: АССОРТИМЕНТ ТОВАРОВ ---
 STOCKS = {
@@ -72,145 +268,6 @@ def idx_to_brand(idx: str) -> str:
     except (ValueError, IndexError):
         return BRAND_LIST[0]
 
-# --- ЧАСТЬ 3: РАБОТА С БАЗОЙ ДАННЫХ ---
-def get_stock(brand: str, flavor: str) -> int:
-    conn = sqlite3.connect('cloude_base.db')
-    row = conn.execute(
-        "SELECT quantity FROM stock WHERE brand = ? AND flavor = ?", (brand, flavor)
-    ).fetchone()
-    conn.close()
-    return row[0] if row else 0
-
-def set_stock(brand: str, flavor: str, quantity: int):
-    conn = sqlite3.connect('cloude_base.db')
-    conn.execute(
-        "INSERT OR REPLACE INTO stock (brand, flavor, quantity) VALUES (?, ?, ?)",
-        (brand, flavor, quantity)
-    )
-    conn.commit()
-    conn.close()
-
-def decrement_stock(brand: str, flavor: str) -> int:
-    conn = sqlite3.connect('cloude_base.db')
-    conn.execute(
-        "UPDATE stock SET quantity = MAX(0, quantity - 1) WHERE brand = ? AND flavor = ?",
-        (brand, flavor)
-    )
-    conn.commit()
-    row = conn.execute(
-        "SELECT quantity FROM stock WHERE brand = ? AND flavor = ?", (brand, flavor)
-    ).fetchone()
-    conn.close()
-    return row[0] if row else 0
-
-def get_balance(user_id: int) -> int:
-    conn = sqlite3.connect('cloude_base.db')
-    row = conn.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,)).fetchone()
-    conn.close()
-    return row[0] if row else 0
-
-def add_balance(user_id: int, amount: int):
-    conn = sqlite3.connect('cloude_base.db')
-    conn.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
-    conn.commit()
-    conn.close()
-
-def spend_balance(user_id: int, amount: int):
-    conn = sqlite3.connect('cloude_base.db')
-    conn.execute("UPDATE users SET balance = MAX(0, balance - ?) WHERE user_id = ?", (amount, user_id))
-    conn.commit()
-    conn.close()
-
-def get_all_user_ids() -> list:
-    conn = sqlite3.connect('cloude_base.db')
-    rows = conn.execute("SELECT user_id FROM users").fetchall()
-    conn.close()
-    return [r[0] for r in rows]
-
-def init_db():
-    conn = sqlite3.connect('cloude_base.db')
-    cur = conn.cursor()
-    cur.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            referrer_id INTEGER,
-            balance INTEGER DEFAULT 0
-        )
-    ''')
-    try:
-        cur.execute("ALTER TABLE users ADD COLUMN balance INTEGER DEFAULT 0")
-    except sqlite3.OperationalError:
-        pass
-
-    cur.execute('''
-        CREATE TABLE IF NOT EXISTS orders (
-            order_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            item_name TEXT,
-            flavor TEXT,
-            total INTEGER,
-            delivery TEXT,
-            info TEXT,
-            status TEXT DEFAULT "Ожидает оплаты",
-            track_number TEXT DEFAULT NULL,
-            photo_id TEXT DEFAULT NULL,
-            date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    try:
-        cur.execute("ALTER TABLE orders ADD COLUMN track_number TEXT DEFAULT NULL")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cur.execute("ALTER TABLE orders ADD COLUMN photo_id TEXT DEFAULT NULL")
-    except sqlite3.OperationalError:
-        pass
-
-    cur.execute('''
-        CREATE TABLE IF NOT EXISTS stock (
-            brand TEXT,
-            flavor TEXT,
-            quantity INTEGER DEFAULT 0,
-            PRIMARY KEY (brand, flavor)
-        )
-    ''')
-
-    cur.execute('''
-        CREATE TABLE IF NOT EXISTS referrals (
-            referrer_id INTEGER,
-            referred_id INTEGER PRIMARY KEY
-        )
-    ''')
-
-    # ✅ НОВАЯ ТАБЛИЦА: отзывы
-    cur.execute('''
-        CREATE TABLE IF NOT EXISTS reviews (
-            review_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            username TEXT,
-            order_id INTEGER,
-            item_name TEXT,
-            flavor TEXT,
-            rating INTEGER,
-            text TEXT DEFAULT NULL,
-            date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-
-    conn.commit()
-    conn.close()
-
-    conn = sqlite3.connect('cloude_base.db')
-    for brand, data in STOCKS.items():
-        for flavor in data["flavors"]:
-            conn.execute(
-                "INSERT OR IGNORE INTO stock (brand, flavor, quantity) VALUES (?, ?, 0)",
-                (brand, flavor)
-            )
-    conn.commit()
-    conn.close()
-
 # --- ЧАСТЬ 5: КНОПКИ МЕНЮ ---
 async def set_main_menu_button(bot: Bot):
     commands = [
@@ -227,15 +284,9 @@ def get_main_keyboard():
     builder.row(types.KeyboardButton(text="🤝 Поддержка"))
     return builder.as_markup(resize_keyboard=True)
 
-# Множество для хранения ожидающих рассылку
 BROADCAST_PENDING = set()
-# Словарь для хранения ожидающих трек-номер: {admin_id: (order_id, user_id)}
 TRACK_PENDING = {}
-# Словарь для ожидающих скриншот оплаты
 PAYMENT_PENDING = {}
-# Словарь для пошагового сбора данных InPost: {user_id: {step, order_id, data}}
-INPOST_COLLECT = {}
-# Словарь для сбора отзыва: {user_id: {order_id, rating, item_name, flavor, username}}
 REVIEW_PENDING = {}
 
 # --- ЧАСТЬ 6: ХЕНДЛЕРЫ МЕНЮ ---
@@ -257,30 +308,30 @@ async def start_handler(message: types.Message):
         except Exception:
             pass
 
-    db = sqlite3.connect('cloude_base.db')
-    is_new = db.execute(
-        "SELECT 1 FROM users WHERE user_id = ?", (message.from_user.id,)
-    ).fetchone() is None
-
-    db.execute(
-        "INSERT OR IGNORE INTO users (user_id, username, referrer_id, balance) VALUES (?, ?, ?, 0)",
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM users WHERE user_id = %s", (message.from_user.id,))
+    is_new = cur.fetchone() is None
+    cur.execute(
+        "INSERT INTO users (user_id, username, referrer_id, balance) VALUES (%s, %s, %s, 0) "
+        "ON CONFLICT (user_id) DO NOTHING",
         (message.from_user.id, message.from_user.username, referrer_id)
     )
-    db.commit()
-    db.close()
+    conn.commit()
+    conn.close()
 
     if is_new and referrer_id and referrer_id != message.from_user.id:
-        db = sqlite3.connect('cloude_base.db')
-        already = db.execute(
-            "SELECT 1 FROM referrals WHERE referred_id = ?", (message.from_user.id,)
-        ).fetchone()
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT 1 FROM referrals WHERE referred_id = %s", (message.from_user.id,))
+        already = cur.fetchone()
         if not already:
-            db.execute(
-                "INSERT OR IGNORE INTO referrals (referrer_id, referred_id) VALUES (?, ?)",
+            cur.execute(
+                "INSERT INTO referrals (referrer_id, referred_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
                 (referrer_id, message.from_user.id)
             )
-            db.commit()
-            db.close()
+            conn.commit()
+            conn.close()
             add_balance(referrer_id, REFERRAL_BONUS)
             try:
                 await bot.send_message(
@@ -291,7 +342,7 @@ async def start_handler(message: types.Message):
             except Exception:
                 pass
         else:
-            db.close()
+            conn.close()
 
     welcome_text = (
         f"Salute, <b>{message.from_user.first_name}</b>! 👋\n\n"
@@ -315,11 +366,11 @@ async def bonus_handler(message: types.Message):
     balance = get_balance(message.from_user.id)
     link = await create_start_link(bot, str(message.from_user.id), encode=True)
 
-    db = sqlite3.connect('cloude_base.db')
-    ref_count = db.execute(
-        "SELECT COUNT(*) FROM referrals WHERE referrer_id = ?", (message.from_user.id,)
-    ).fetchone()[0]
-    db.close()
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id = %s", (message.from_user.id,))
+    ref_count = cur.fetchone()[0]
+    conn.close()
 
     await message.answer(
         f"💰 <b>Твой баланс: {balance}zł</b>\n\n"
@@ -339,12 +390,15 @@ async def reviews_handler(message: types.Message):
 
 @dp.message(F.text == "📥 Мои заказы")
 async def my_orders_handler(message: types.Message):
-    db = sqlite3.connect('cloude_base.db')
-    rows = db.execute(
-        "SELECT item_name, flavor, total, status, track_number FROM orders WHERE user_id = ? ORDER BY date DESC LIMIT 5",
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT item_name, flavor, total, status, track_number FROM orders "
+        "WHERE user_id = %s ORDER BY date DESC LIMIT 5",
         (message.from_user.id,)
-    ).fetchall()
-    db.close()
+    )
+    rows = cur.fetchall()
+    conn.close()
 
     if not rows:
         return await message.answer("У тебя пока нет заказов.")
@@ -373,9 +427,7 @@ def get_admin_stock_keyboard(brand_idx: str):
     for i, flavor in enumerate(brand_data.get("flavors", [])):
         qty = get_stock(brand_name, flavor)
         status = f"✅ {qty} шт." if qty > 0 else "❌ Sold Out"
-        keyboard.row(
-            types.InlineKeyboardButton(text=f"{flavor} — {status}", callback_data="noop")
-        )
+        keyboard.row(types.InlineKeyboardButton(text=f"{flavor} — {status}", callback_data="noop"))
         keyboard.row(
             types.InlineKeyboardButton(text="➖1", callback_data=f"adm_m_{brand_idx}_{i}"),
             types.InlineKeyboardButton(text="➕1", callback_data=f"adm_p_{brand_idx}_{i}"),
@@ -398,19 +450,13 @@ def get_admin_brands_keyboard():
 async def admin_panel(message: types.Message):
     if message.from_user.id != ADMIN:
         return await message.answer("⛔️ Нет доступа.")
-    await message.answer(
-        "⚙️ <b>Админ-панель</b>\n\nВыбери раздел:",
-        reply_markup=get_admin_brands_keyboard()
-    )
+    await message.answer("⚙️ <b>Админ-панель</b>\n\nВыбери раздел:", reply_markup=get_admin_brands_keyboard())
 
 @dp.callback_query(F.data == "adm_brands")
 async def adm_brands(call: types.CallbackQuery):
     if call.from_user.id != ADMIN:
         return await call.answer("⛔️ Нет доступа.", show_alert=True)
-    await call.message.edit_text(
-        "⚙️ <b>Админ-панель</b>\n\nВыбери раздел:",
-        reply_markup=get_admin_brands_keyboard()
-    )
+    await call.message.edit_text("⚙️ <b>Админ-панель</b>\n\nВыбери раздел:", reply_markup=get_admin_brands_keyboard())
 
 @dp.callback_query(F.data == "adm_broadcast")
 async def adm_broadcast_start(call: types.CallbackQuery):
@@ -469,7 +515,6 @@ async def adm_stock_action(call: types.CallbackQuery):
         return await call.answer("Неизвестное действие")
 
     set_stock(brand_name, flavor, new_qty)
-
     status = f"✅ {new_qty} шт." if new_qty > 0 else "❌ Sold Out"
     await call.answer(f"{flavor}: {status}")
     await call.message.edit_reply_markup(reply_markup=get_admin_stock_keyboard(brand_idx))
@@ -504,12 +549,7 @@ async def flavors_callback(call: types.CallbackQuery):
 
     if brand_data and brand_data["photo"]:
         await call.message.delete()
-        await call.bot.send_photo(
-            call.from_user.id,
-            brand_data["photo"],
-            caption=caption,
-            reply_markup=keyboard.as_markup()
-        )
+        await call.bot.send_photo(call.from_user.id, brand_data["photo"], caption=caption, reply_markup=keyboard.as_markup())
     else:
         await call.message.edit_text(caption, reply_markup=keyboard.as_markup())
 
@@ -523,7 +563,6 @@ async def soldout_handler(call: types.CallbackQuery):
 async def delivery_callback(call: types.CallbackQuery):
     parts = call.data.split("_")
     brand_idx, flavor_idx, price = parts[1], parts[2], parts[3]
-
     brand_name = idx_to_brand(brand_idx)
     flavors = STOCKS.get(brand_name, {}).get("flavors", [])
 
@@ -541,12 +580,10 @@ async def delivery_callback(call: types.CallbackQuery):
 
     keyboard = InlineKeyboardBuilder()
     keyboard.row(types.InlineKeyboardButton(
-        text="📦 InPost (+14zł)",
-        callback_data=f"pay_i_{brand_idx}_{flavor_idx}_{price_int + 14}_0"
+        text="📦 InPost (+14zł)", callback_data=f"pay_i_{brand_idx}_{flavor_idx}_{price_int + 14}_0"
     ))
     keyboard.row(types.InlineKeyboardButton(
-        text="🤝 Inpost GRATIS (От 5 штук)",
-        callback_data=f"pay_g_{brand_idx}_{flavor_idx}_{price_int}_0"
+        text="🤝 Inpost GRATIS (От 5 штук)", callback_data=f"pay_g_{brand_idx}_{flavor_idx}_{price_int}_0"
     ))
 
     if balance > 0:
@@ -560,10 +597,7 @@ async def delivery_callback(call: types.CallbackQuery):
             callback_data=f"pay_g_{brand_idx}_{flavor_idx}_{price_int}_{use_bonus}"
         ))
 
-    keyboard.row(types.InlineKeyboardButton(
-        text="⬅️ Назад к вкусам",
-        callback_data=f"brn_{brand_idx}"
-    ))
+    keyboard.row(types.InlineKeyboardButton(text="⬅️ Назад к вкусам", callback_data=f"brn_{brand_idx}"))
 
     text = f"📍 <b>Оформление:</b> {brand_name} — {flavor}\n\nВыбери способ получения:"
     if balance > 0:
@@ -578,7 +612,6 @@ async def payment_callback(call: types.CallbackQuery):
     parts = call.data.split("_")
     delivery_code = parts[1]
     brand_idx, flavor_idx, total, bonus_used = parts[2], parts[3], parts[4], parts[5]
-
     brand_name = idx_to_brand(brand_idx)
     flavors = STOCKS.get(brand_name, {}).get("flavors", [])
 
@@ -589,8 +622,7 @@ async def payment_callback(call: types.CallbackQuery):
 
     delivery_type = "InPost" if delivery_code == "i" else "GRATIS"
     bonus_int = int(bonus_used)
-    total_int = int(total)
-    final_total = max(0, total_int - bonus_int)
+    final_total = max(0, int(total) - bonus_int)
 
     pay_text = (
         f"💳 <b>Оплата заказа</b>\n\n"
@@ -614,13 +646,9 @@ async def payment_callback(call: types.CallbackQuery):
     keyboard.row(types.InlineKeyboardButton(text="❌ Отменить", callback_data="back_to_cats"))
 
     PAYMENT_PENDING[call.from_user.id] = {
-        "delivery_code": delivery_code,
-        "brand_idx": brand_idx,
-        "flavor_idx": flavor_idx,
-        "total": final_total,
-        "bonus": bonus_int
+        "delivery_code": delivery_code, "brand_idx": brand_idx,
+        "flavor_idx": flavor_idx, "total": final_total, "bonus": bonus_int
     }
-
     await call.message.edit_text(pay_text, reply_markup=keyboard.as_markup())
 
 
@@ -629,7 +657,6 @@ async def finish_callback(call: types.CallbackQuery):
     parts = call.data.split("_")
     delivery_code = parts[1]
     brand_idx, flavor_idx, total, bonus_used = parts[2], parts[3], parts[4], parts[5]
-
     brand_name = idx_to_brand(brand_idx)
     flavors = STOCKS.get(brand_name, {}).get("flavors", [])
 
@@ -638,73 +665,54 @@ async def finish_callback(call: types.CallbackQuery):
     except (IndexError, ValueError):
         return await call.answer("Ошибка: вкус не найден")
 
-    delivery = "InPost" if delivery_code == "i" else "GRATIS"
-    bonus_int = int(bonus_used)
-
     PAYMENT_PENDING.pop(call.from_user.id, None)
-
     await _create_order(
-        bot=call.bot,
-        user_id=call.from_user.id,
+        bot=call.bot, user_id=call.from_user.id,
         username=call.from_user.username or "без ника",
-        brand_name=brand_name,
-        flavor=flavor,
-        total=total,
-        delivery=delivery,
-        bonus_used=bonus_int,
-        photo_id=None,
-        message=call.message,
-        is_callback=True
+        brand_name=brand_name, flavor=flavor, total=total,
+        delivery="InPost" if delivery_code == "i" else "GRATIS",
+        bonus_used=int(bonus_used), photo_id=None,
+        message=call.message, is_callback=True
     )
+
+
+def _build_admin_order_kb(order_id, user_id):
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        types.InlineKeyboardButton(text="✅ Оплата пришла", callback_data=f"confirm_{order_id}_{user_id}"),
+        types.InlineKeyboardButton(text="❌ Не пришла", callback_data=f"reject_{order_id}_{user_id}")
+    )
+    kb.row(types.InlineKeyboardButton(text="🚚 Отправить трек", callback_data=f"track_{order_id}_{user_id}"))
+    kb.row(types.InlineKeyboardButton(text="📦 Доставлено", callback_data=f"delivered_{order_id}_{user_id}"))
+    return kb.as_markup()
 
 
 async def _create_order(bot, user_id, username, brand_name, flavor, total, delivery,
                         bonus_used, photo_id, message, is_callback=False):
-    db = sqlite3.connect('cloude_base.db')
-    cur = db.cursor()
+    conn = get_conn()
+    cur = conn.cursor()
     cur.execute(
         "INSERT INTO orders (user_id, item_name, flavor, total, delivery, info, status, photo_id) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING order_id",
         (user_id, brand_name, flavor, total, delivery, "", "WAIT_DATA", photo_id)
     )
-    order_id = cur.lastrowid
-    db.commit()
-    db.close()
+    order_id = cur.fetchone()[0]
+    conn.commit()
+    conn.close()
 
     if bonus_used > 0:
         spend_balance(user_id, bonus_used)
 
     if delivery == "InPost":
-        INPOST_COLLECT[user_id] = {
-            "step": "name",
-            "order_id": order_id,
-            "name": "",
-            "phone": "",
-            "email": "",
-            "paczkomat": ""
-        }
-        text = (
-            "📝 <b>Данные для InPost</b>\n\n"
-            "Шаг 1/4 — Напиши своё <b>полное имя и фамилию</b>:"
-        )
+        set_collect(user_id, {"step": "name", "order_id": order_id,
+                               "name": "", "phone": "", "email": "", "paczkomat": ""})
+        text = "📝 <b>Данные для InPost</b>\n\nШаг 1/4 — Напиши своё <b>полное имя и фамилию</b>:"
         if is_callback:
             await message.edit_text(text)
         else:
             await bot.send_message(user_id, text)
     else:
         if ADMIN:
-            kb = InlineKeyboardBuilder()
-            kb.row(
-                types.InlineKeyboardButton(text="✅ Оплата пришла", callback_data=f"confirm_{order_id}_{user_id}"),
-                types.InlineKeyboardButton(text="❌ Не пришла", callback_data=f"reject_{order_id}_{user_id}")
-            )
-            kb.row(
-                types.InlineKeyboardButton(text="🚚 Отправить трек", callback_data=f"track_{order_id}_{user_id}")
-            )
-            # ✅ Новая кнопка "Доставлено"
-            kb.row(
-                types.InlineKeyboardButton(text="📦 Доставлено", callback_data=f"delivered_{order_id}_{user_id}")
-            )
             admin_text = (
                 f"⚡️ <b>НОВЫЙ ЗАКАЗ (GRATIS)</b>\n"
                 f"👤 @{username} (<code>{user_id}</code>)\n"
@@ -714,12 +722,13 @@ async def _create_order(bot, user_id, username, brand_name, flavor, total, deliv
             if bonus_used > 0:
                 admin_text += f" (скидка -{bonus_used}zł)"
             admin_text += f"\n🚚 Доставка: {delivery}\n🆔 Заказ №{order_id}"
+            if not photo_id:
+                admin_text += "\n📸 Скриншот: не прислан"
 
             if photo_id:
-                await bot.send_photo(ADMIN, photo_id, caption=admin_text, reply_markup=kb.as_markup())
+                await bot.send_photo(ADMIN, photo_id, caption=admin_text, reply_markup=_build_admin_order_kb(order_id, user_id))
             else:
-                admin_text += "\n📸 Скриншот: не прислан"
-                await bot.send_message(ADMIN, admin_text, reply_markup=kb.as_markup())
+                await bot.send_message(ADMIN, admin_text, reply_markup=_build_admin_order_kb(order_id, user_id))
 
         reply_text = "🚀 <b>Заказ принят!</b> Менеджер свяжется с тобой для передачи товара."
         if is_callback:
@@ -734,10 +743,8 @@ async def back_to_cats(call: types.CallbackQuery):
     for brand in BRAND_LIST:
         idx = brand_to_idx(brand)
         keyboard.row(types.InlineKeyboardButton(text=brand, callback_data=f"brn_{idx}"))
-
-    text = "✨ <b>Каталог продукции</b>\nВыбери бренд:"
     await call.message.delete()
-    await call.bot.send_message(call.from_user.id, text, reply_markup=keyboard.as_markup())
+    await call.bot.send_message(call.from_user.id, "✨ <b>Каталог продукции</b>\nВыбери бренд:", reply_markup=keyboard.as_markup())
 
 
 # --- ЧАСТЬ 9: ОБРАБОТКА ТЕКСТА И ФОТО ---
@@ -750,37 +757,22 @@ async def photo_handler(message: types.Message):
 
     if message.from_user.id in PAYMENT_PENDING:
         pending = PAYMENT_PENDING.pop(message.from_user.id)
-        delivery_code = pending["delivery_code"]
-        brand_idx = pending["brand_idx"]
-        flavor_idx = pending["flavor_idx"]
-        total = pending["total"]
-        bonus_int = pending["bonus"]
-
-        brand_name = idx_to_brand(brand_idx)
+        brand_name = idx_to_brand(pending["brand_idx"])
         flavors = STOCKS.get(brand_name, {}).get("flavors", [])
-
         try:
-            flavor = flavors[int(flavor_idx)]
+            flavor = flavors[int(pending["flavor_idx"])]
         except (IndexError, ValueError):
             return await message.answer("Ошибка: вкус не найден")
 
-        delivery = "InPost" if delivery_code == "i" else "GRATIS"
-        photo_id = message.photo[-1].file_id
-        username = message.from_user.username or "без ника"
-
         await message.answer("✅ Скриншот получен! Сейчас заполним данные для доставки.")
         await _create_order(
-            bot=bot,
-            user_id=message.from_user.id,
-            username=username,
-            brand_name=brand_name,
-            flavor=flavor,
-            total=total,
-            delivery=delivery,
-            bonus_used=bonus_int,
-            photo_id=photo_id,
-            message=message,
-            is_callback=False
+            bot=bot, user_id=message.from_user.id,
+            username=message.from_user.username or "без ника",
+            brand_name=brand_name, flavor=flavor,
+            total=pending["total"],
+            delivery="InPost" if pending["delivery_code"] == "i" else "GRATIS",
+            bonus_used=pending["bonus"], photo_id=message.photo[-1].file_id,
+            message=message, is_callback=False
         )
 
 
@@ -806,68 +798,56 @@ async def text_handler(message: types.Message):
     if user_id == ADMIN and user_id in TRACK_PENDING:
         order_id, buyer_id = TRACK_PENDING.pop(user_id)
         track = message.text.strip()
-
-        db = sqlite3.connect('cloude_base.db')
-        db.execute(
-            "UPDATE orders SET track_number = ?, status = 'В пути' WHERE order_id = ?",
-            (track, order_id)
-        )
-        db.commit()
-        db.close()
-
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("UPDATE orders SET track_number = %s, status = 'В пути' WHERE order_id = %s", (track, order_id))
+        conn.commit()
+        conn.close()
         await message.answer(f"✅ Трек-номер <code>{track}</code> сохранён для заказа №{order_id}.")
         try:
-            await bot.send_message(
-                buyer_id,
+            await bot.send_message(buyer_id,
                 f"📦 <b>Твой заказ отправлен!</b>\n\nТрек-номер: <code>{track}</code>\n"
-                "Отследить посылку можно на сайте InPost. 🚀"
-            )
+                "Отследить посылку можно на сайте InPost. 🚀")
         except Exception:
             await message.answer("⚠️ Не удалось уведомить пользователя.")
         return
 
-    # ✅ Текстовый комментарий к отзыву
+    # Текстовый комментарий к отзыву
     if user_id in REVIEW_PENDING and REVIEW_PENDING[user_id].get("step") == "text":
         pending = REVIEW_PENDING.pop(user_id)
-        review_text = message.text.strip()
-        await _save_review(
-            user_id=user_id,
-            username=pending["username"],
-            order_id=pending["order_id"],
-            item_name=pending["item_name"],
-            flavor=pending["flavor"],
-            rating=pending["rating"],
-            text=review_text
-        )
-        await message.answer(
-            "💬 Спасибо за отзыв! Твоё мнение очень важно для нас ☁️",
-            reply_markup=get_main_keyboard()
-        )
+        await _save_review(user_id=user_id, username=pending["username"],
+                           order_id=pending["order_id"], item_name=pending["item_name"],
+                           flavor=pending["flavor"], rating=pending["rating"], text=message.text.strip())
+        await message.answer("💬 Спасибо за отзыв! Твоё мнение очень важно для нас ☁️",
+                             reply_markup=get_main_keyboard())
         return
 
     # Пошаговый сбор данных InPost
-    if user_id in INPOST_COLLECT:
-        collect = INPOST_COLLECT[user_id]
+    if collect_exists(user_id):
+        collect = get_collect(user_id)
         step = collect["step"]
 
         if step == "name":
             collect["name"] = message.text.strip()
             collect["step"] = "phone"
+            set_collect(user_id, collect)
             await message.answer("📞 Шаг 2/4 — Напиши свой <b>номер телефона</b>:")
 
         elif step == "phone":
             collect["phone"] = message.text.strip()
             collect["step"] = "email"
+            set_collect(user_id, collect)
             await message.answer("📧 Шаг 3/4 — Напиши свой <b>email</b>:")
 
         elif step == "email":
             collect["email"] = message.text.strip()
             collect["step"] = "paczkomat"
+            set_collect(user_id, collect)
             await message.answer("📦 Шаг 4/4 — Напиши <b>код пачкомата</b> (напр. KRA01M):")
 
         elif step == "paczkomat":
             collect["paczkomat"] = message.text.strip()
-            INPOST_COLLECT.pop(user_id)
+            delete_collect(user_id)
 
             order_id = collect["order_id"]
             info_text = (
@@ -877,17 +857,14 @@ async def text_handler(message: types.Message):
                 f"Пачкомат: {collect['paczkomat']}"
             )
 
-            db = sqlite3.connect('cloude_base.db')
-            row = db.execute(
-                "SELECT item_name, flavor, total, photo_id FROM orders WHERE order_id = ?",
-                (order_id,)
-            ).fetchone()
-            db.execute(
-                "UPDATE orders SET info = ?, status = 'Ожидает подтверждения' WHERE order_id = ?",
-                (info_text, order_id)
-            )
-            db.commit()
-            db.close()
+            conn = get_conn()
+            cur = conn.cursor()
+            cur.execute("SELECT item_name, flavor, total, photo_id FROM orders WHERE order_id = %s", (order_id,))
+            row = cur.fetchone()
+            cur.execute("UPDATE orders SET info = %s, status = 'Ожидает подтверждения' WHERE order_id = %s",
+                        (info_text, order_id))
+            conn.commit()
+            conn.close()
 
             await message.answer(
                 "✅ <b>Все данные получены!</b>\n"
@@ -897,18 +874,6 @@ async def text_handler(message: types.Message):
             if ADMIN and row:
                 item, flavor, total, saved_photo = row
                 username = message.from_user.username or "без ника"
-                kb = InlineKeyboardBuilder()
-                kb.row(
-                    types.InlineKeyboardButton(text="✅ Оплата пришла", callback_data=f"confirm_{order_id}_{user_id}"),
-                    types.InlineKeyboardButton(text="❌ Не пришла", callback_data=f"reject_{order_id}_{user_id}")
-                )
-                kb.row(
-                    types.InlineKeyboardButton(text="🚚 Отправить трек", callback_data=f"track_{order_id}_{user_id}")
-                )
-                # ✅ Новая кнопка "Доставлено"
-                kb.row(
-                    types.InlineKeyboardButton(text="📦 Доставлено", callback_data=f"delivered_{order_id}_{user_id}")
-                )
                 admin_text = (
                     f"💰 <b>НОВЫЙ ЗАКАЗ (InPost)</b>\n"
                     f"👤 @{username} (<code>{user_id}</code>)\n"
@@ -918,11 +883,14 @@ async def text_handler(message: types.Message):
                     f"📋 <b>Данные доставки:</b>\n{info_text}\n\n"
                     f"🆔 Заказ №{order_id}"
                 )
-                if saved_photo:
-                    await bot.send_photo(ADMIN, saved_photo, caption=admin_text, reply_markup=kb.as_markup())
-                else:
+                if not saved_photo:
                     admin_text += "\n📸 Скриншот: не прислан"
-                    await bot.send_message(ADMIN, admin_text, reply_markup=kb.as_markup())
+                if saved_photo:
+                    await bot.send_photo(ADMIN, saved_photo, caption=admin_text,
+                                         reply_markup=_build_admin_order_kb(order_id, user_id))
+                else:
+                    await bot.send_message(ADMIN, admin_text,
+                                           reply_markup=_build_admin_order_kb(order_id, user_id))
         return
 
     await message.answer("Используй кнопки меню для заказа. Если есть вопросы — пиши в поддержку.")
@@ -934,84 +902,66 @@ async def text_handler(message: types.Message):
 async def confirm_order(call: types.CallbackQuery):
     if call.from_user.id != ADMIN:
         return await call.answer("⛔️ Нет доступа.", show_alert=True)
-
     parts = call.data.split("_")
     order_id, user_id = int(parts[1]), int(parts[2])
 
-    db = sqlite3.connect('cloude_base.db')
-    row = db.execute(
-        "SELECT item_name, flavor, status FROM orders WHERE order_id = ?", (order_id,)
-    ).fetchone()
-
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT item_name, flavor, status FROM orders WHERE order_id = %s", (order_id,))
+    row = cur.fetchone()
     if not row:
-        db.close()
+        conn.close()
         return await call.answer("Заказ не найден", show_alert=True)
-
     item_name, flavor, status = row
-
     if status == "Подтверждён":
-        db.close()
+        conn.close()
         return await call.answer("Заказ уже подтверждён!", show_alert=True)
-
-    db.execute("UPDATE orders SET status = 'Подтверждён' WHERE order_id = ?", (order_id,))
-    db.commit()
-    db.close()
+    cur.execute("UPDATE orders SET status = 'Подтверждён' WHERE order_id = %s", (order_id,))
+    conn.commit()
+    conn.close()
 
     new_qty = decrement_stock(item_name, flavor)
-
-    if new_qty <= LOW_STOCK_THRESHOLD and ADMIN:
-        await bot.send_message(
-            ADMIN,
-            f"⚠️ <b>Внимание! Товар заканчивается!</b>\n"
-            f"📦 {item_name} — {flavor}\n"
-            f"Остаток: <b>{new_qty} шт.</b>"
-        )
+    if new_qty <= LOW_STOCK_THRESHOLD:
+        await bot.send_message(ADMIN,
+            f"⚠️ <b>Товар заканчивается!</b>\n📦 {item_name} — {flavor}\nОстаток: <b>{new_qty} шт.</b>")
 
     await call.message.edit_text(call.message.text + "\n\n✅ <b>Подтверждено!</b> Склад обновлён.")
-    await bot.send_message(
-        user_id,
-        "✅ <b>Оплата подтверждена!</b>\nТвой заказ принят в обработку. Скоро получишь трек-номер или свяжемся по деталям. 🚀"
-    )
+    await bot.send_message(user_id,
+        "✅ <b>Оплата подтверждена!</b>\nТвой заказ принят в обработку. Скоро получишь трек-номер. 🚀")
 
 
 @dp.callback_query(F.data.startswith("reject_"))
 async def reject_order(call: types.CallbackQuery):
     if call.from_user.id != ADMIN:
         return await call.answer("⛔️ Нет доступа.", show_alert=True)
-
     parts = call.data.split("_")
     order_id, user_id = int(parts[1]), int(parts[2])
 
-    db = sqlite3.connect('cloude_base.db')
-    row = db.execute("SELECT status FROM orders WHERE order_id = ?", (order_id,)).fetchone()
-
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT status FROM orders WHERE order_id = %s", (order_id,))
+    row = cur.fetchone()
     if not row:
-        db.close()
+        conn.close()
         return await call.answer("Заказ не найден", show_alert=True)
-
     if row[0] == "Отклонён":
-        db.close()
+        conn.close()
         return await call.answer("Заказ уже отклонён!", show_alert=True)
+    cur.execute("UPDATE orders SET status = 'Отклонён' WHERE order_id = %s", (order_id,))
+    conn.commit()
+    conn.close()
 
-    db.execute("UPDATE orders SET status = 'Отклонён' WHERE order_id = ?", (order_id,))
-    db.commit()
-    db.close()
-
-    await call.message.edit_text(call.message.text + "\n\n❌ <b>Отклонено.</b> Склад не тронут.")
-    await bot.send_message(
-        user_id,
-        "❌ <b>Оплата не найдена.</b>\nПроверь, правильно ли ты перевёл сумму. Если есть вопросы — напиши в поддержку 🤝"
-    )
+    await call.message.edit_text(call.message.text + "\n\n❌ <b>Отклонено.</b>")
+    await bot.send_message(user_id,
+        "❌ <b>Оплата не найдена.</b>\nПроверь перевод. Вопросы — в поддержку 🤝")
 
 
 @dp.callback_query(F.data.startswith("track_"))
 async def send_track_number(call: types.CallbackQuery):
     if call.from_user.id != ADMIN:
         return await call.answer("⛔️ Нет доступа.", show_alert=True)
-
     parts = call.data.split("_")
     order_id, user_id = int(parts[1]), int(parts[2])
-
     TRACK_PENDING[call.from_user.id] = (order_id, user_id)
     await call.answer("Отправь трек-номер следующим сообщением.", show_alert=True)
 
@@ -1020,203 +970,151 @@ async def send_track_number(call: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("delivered_"))
 async def order_delivered(call: types.CallbackQuery):
-    """Админ отмечает заказ как доставленный — клиенту уходит запрос отзыва."""
     if call.from_user.id != ADMIN:
         return await call.answer("⛔️ Нет доступа.", show_alert=True)
-
     parts = call.data.split("_")
     order_id, user_id = int(parts[1]), int(parts[2])
 
-    db = sqlite3.connect('cloude_base.db')
-    row = db.execute(
-        "SELECT item_name, flavor, status FROM orders WHERE order_id = ?", (order_id,)
-    ).fetchone()
-
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT item_name, flavor, status FROM orders WHERE order_id = %s", (order_id,))
+    row = cur.fetchone()
     if not row:
-        db.close()
+        conn.close()
         return await call.answer("Заказ не найден", show_alert=True)
-
     item_name, flavor, status = row
-
     if status == "Доставлен":
-        db.close()
+        conn.close()
         return await call.answer("Заказ уже отмечен как доставленный!", show_alert=True)
-
-    db.execute("UPDATE orders SET status = 'Доставлен' WHERE order_id = ?", (order_id,))
-    db.commit()
-    db.close()
+    cur.execute("UPDATE orders SET status = 'Доставлен' WHERE order_id = %s", (order_id,))
+    conn.commit()
+    conn.close()
 
     await call.message.edit_text(call.message.text + "\n\n📦 <b>Доставлено!</b> Запрос отзыва отправлен клиенту.")
 
-    # Отправляем клиенту запрос на отзыв
     kb = InlineKeyboardBuilder()
-    stars = ["⭐", "⭐⭐", "⭐⭐⭐", "⭐⭐⭐⭐", "⭐⭐⭐⭐⭐"]
-    for i, s in enumerate(stars, 1):
+    for i, s in enumerate(["⭐", "⭐⭐", "⭐⭐⭐", "⭐⭐⭐⭐", "⭐⭐⭐⭐⭐"], 1):
         kb.button(text=s, callback_data=f"revrate_{i}_{order_id}")
     kb.adjust(5)
     kb.row(types.InlineKeyboardButton(text="🙅 Пропустить", callback_data=f"revskip_{order_id}"))
 
     try:
-        await bot.send_message(
-            user_id,
-            f"☁️ <b>Как тебе заказ?</b>\n\n"
-            f"📦 {item_name} — {flavor}\n\n"
-            f"Оцени свою покупку — это займёт 10 секунд и поможет другим покупателям!",
-            reply_markup=kb.as_markup()
-        )
+        await bot.send_message(user_id,
+            f"☁️ <b>Как тебе заказ?</b>\n\n📦 {item_name} — {flavor}\n\n"
+            f"Оцени покупку — это займёт 10 секунд!",
+            reply_markup=kb.as_markup())
     except Exception:
-        await call.answer("⚠️ Не удалось отправить запрос отзыва клиенту.", show_alert=True)
+        await call.answer("⚠️ Не удалось отправить запрос отзыва.", show_alert=True)
 
 
 @dp.callback_query(F.data.startswith("revrate_"))
 async def review_rating(call: types.CallbackQuery):
-    """Клиент выбрал оценку в звёздах."""
     parts = call.data.split("_")
-    rating = int(parts[1])
-    order_id = int(parts[2])
+    rating, order_id = int(parts[1]), int(parts[2])
 
-    db = sqlite3.connect('cloude_base.db')
-    row = db.execute(
-        "SELECT item_name, flavor FROM orders WHERE order_id = ?", (order_id,)
-    ).fetchone()
-    db.close()
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT item_name, flavor FROM orders WHERE order_id = %s", (order_id,))
+    row = cur.fetchone()
+    conn.close()
 
     if not row:
         return await call.answer("Заказ не найден", show_alert=True)
-
     item_name, flavor = row
-    stars_display = "⭐" * rating
 
-    # Сохраняем в pending, ждём текстовый комментарий
     REVIEW_PENDING[call.from_user.id] = {
-        "step": "text",
-        "order_id": order_id,
-        "rating": rating,
-        "item_name": item_name,
-        "flavor": flavor,
+        "step": "text", "order_id": order_id, "rating": rating,
+        "item_name": item_name, "flavor": flavor,
         "username": call.from_user.username or call.from_user.first_name or "Покупатель"
     }
 
     kb = InlineKeyboardBuilder()
-    kb.row(types.InlineKeyboardButton(text="➡️ Пропустить комментарий", callback_data=f"revnotext_{order_id}_{rating}"))
-
+    kb.row(types.InlineKeyboardButton(text="➡️ Пропустить комментарий",
+                                       callback_data=f"revnotext_{order_id}_{rating}"))
     await call.message.edit_text(
-        f"Ты поставил {stars_display}\n\n"
-        f"💬 Хочешь добавить комментарий? Напиши его следующим сообщением.\n"
-        f"Или нажми кнопку ниже, чтобы пропустить.",
+        f"Ты поставил {"⭐" * rating}\n\n💬 Хочешь добавить комментарий? Напиши его.\n"
+        "Или нажми кнопку, чтобы пропустить.",
         reply_markup=kb.as_markup()
     )
 
 
 @dp.callback_query(F.data.startswith("revnotext_"))
 async def review_no_text(call: types.CallbackQuery):
-    """Клиент пропустил текстовый комментарий."""
     parts = call.data.split("_")
-    order_id = int(parts[1])
-    rating = int(parts[2])
-
+    order_id, rating = int(parts[1]), int(parts[2])
     REVIEW_PENDING.pop(call.from_user.id, None)
 
-    db = sqlite3.connect('cloude_base.db')
-    row = db.execute(
-        "SELECT item_name, flavor FROM orders WHERE order_id = ?", (order_id,)
-    ).fetchone()
-    db.close()
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT item_name, flavor FROM orders WHERE order_id = %s", (order_id,))
+    row = cur.fetchone()
+    conn.close()
 
     item_name, flavor = row if row else ("Товар", "—")
     username = call.from_user.username or call.from_user.first_name or "Покупатель"
-
-    await _save_review(
-        user_id=call.from_user.id,
-        username=username,
-        order_id=order_id,
-        item_name=item_name,
-        flavor=flavor,
-        rating=rating,
-        text=None
-    )
+    await _save_review(user_id=call.from_user.id, username=username, order_id=order_id,
+                       item_name=item_name, flavor=flavor, rating=rating, text=None)
     await call.message.edit_text("💬 Спасибо за оценку! Это помогает нам становиться лучше ☁️")
 
 
 @dp.callback_query(F.data.startswith("revskip_"))
 async def review_skip(call: types.CallbackQuery):
-    """Клиент полностью пропустил отзыв."""
-    await call.message.edit_text("Хорошо, если захочешь — можешь оставить отзыв в любое время в разделе ⭐️ Отзывы 😊")
+    await call.message.edit_text("Хорошо! Если захочешь — оставь отзыв через ⭐️ Отзывы 😊")
 
 
-async def _save_review(user_id: int, username: str, order_id: int, item_name: str,
-                       flavor: str, rating: int, text: str | None):
-    """Сохраняет отзыв в БД и уведомляет админа."""
-    db = sqlite3.connect('cloude_base.db')
-    cur = db.cursor()
+async def _save_review(user_id, username, order_id, item_name, flavor, rating, text):
+    conn = get_conn()
+    cur = conn.cursor()
     cur.execute(
         "INSERT INTO reviews (user_id, username, order_id, item_name, flavor, rating, text) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING review_id",
         (user_id, username, order_id, item_name, flavor, rating, text)
     )
-    review_id = cur.lastrowid
-    db.commit()
-    db.close()
+    review_id = cur.fetchone()[0]
+    conn.commit()
+    conn.close()
 
     if not ADMIN:
         return
 
-    stars_display = "⭐" * rating
+    stars = "⭐" * rating
     admin_text = (
         f"💬 <b>Новый отзыв!</b>\n\n"
         f"👤 @{username} (<code>{user_id}</code>)\n"
         f"📦 {item_name} — {flavor}\n"
-        f"Оценка: {stars_display} ({rating}/5)\n"
+        f"Оценка: {stars} ({rating}/5)\n"
     )
-    if text:
-        admin_text += f"\n💬 <i>«{text}»</i>"
-    else:
-        admin_text += "\n💬 <i>Без комментария</i>"
+    admin_text += f"\n💬 <i>«{text}»</i>" if text else "\n💬 <i>Без комментария</i>"
     admin_text += f"\n\n🆔 Отзыв №{review_id} | Заказ №{order_id}"
 
     kb = InlineKeyboardBuilder()
     if REVIEWS_CHANNEL_ID:
-        kb.row(types.InlineKeyboardButton(
-            text="📢 Опубликовать в канал",
-            callback_data=f"revpub_{review_id}"
-        ))
-    kb.row(types.InlineKeyboardButton(
-        text="🗑 Не публиковать",
-        callback_data=f"revdel_{review_id}"
-    ))
-
+        kb.row(types.InlineKeyboardButton(text="📢 Опубликовать в канал", callback_data=f"revpub_{review_id}"))
+    kb.row(types.InlineKeyboardButton(text="🗑 Не публиковать", callback_data=f"revdel_{review_id}"))
     await bot.send_message(ADMIN, admin_text, reply_markup=kb.as_markup())
 
 
 @dp.callback_query(F.data.startswith("revpub_"))
 async def review_publish(call: types.CallbackQuery):
-    """Админ публикует отзыв в канал."""
     if call.from_user.id != ADMIN:
         return await call.answer("⛔️ Нет доступа.", show_alert=True)
-
     if not REVIEWS_CHANNEL_ID:
-        return await call.answer("⚠️ REVIEWS_CHANNEL_ID не задан в .env!", show_alert=True)
+        return await call.answer("⚠️ REVIEWS_CHANNEL_ID не задан!", show_alert=True)
 
     review_id = int(call.data.split("_")[1])
-
-    db = sqlite3.connect('cloude_base.db')
-    row = db.execute(
-        "SELECT username, item_name, flavor, rating, text FROM reviews WHERE review_id = ?",
-        (review_id,)
-    ).fetchone()
-    db.close()
-
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT username, item_name, flavor, rating, text FROM reviews WHERE review_id = %s", (review_id,))
+    row = cur.fetchone()
+    conn.close()
     if not row:
         return await call.answer("Отзыв не найден", show_alert=True)
 
     username, item_name, flavor, rating, text = row
-    stars_display = "⭐" * rating
-
-    # Красиво оформленный пост для канала
     channel_text = (
         f"☁️ <b>Отзыв покупателя</b>\n\n"
         f"📦 <b>{item_name}</b> — {flavor}\n"
-        f"Оценка: {stars_display}\n"
+        f"Оценка: {"⭐" * rating}\n"
     )
     if text:
         channel_text += f"\n💬 <i>«{text}»</i>\n"
@@ -1224,16 +1122,13 @@ async def review_publish(call: types.CallbackQuery):
 
     try:
         await bot.send_message(REVIEWS_CHANNEL_ID, channel_text)
-        await call.message.edit_text(
-            call.message.text + "\n\n✅ <b>Опубликовано в канал!</b>"
-        )
+        await call.message.edit_text(call.message.text + "\n\n✅ <b>Опубликовано в канал!</b>")
     except Exception as e:
-        await call.answer(f"Ошибка публикации: {e}", show_alert=True)
+        await call.answer(f"Ошибка: {e}", show_alert=True)
 
 
 @dp.callback_query(F.data.startswith("revdel_"))
 async def review_delete(call: types.CallbackQuery):
-    """Админ решил не публиковать отзыв."""
     if call.from_user.id != ADMIN:
         return await call.answer("⛔️ Нет доступа.", show_alert=True)
     await call.message.edit_text(call.message.text + "\n\n🗑 <b>Не опубликован.</b>")
