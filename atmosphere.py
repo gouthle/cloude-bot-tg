@@ -822,6 +822,23 @@ async def text_handler(message: types.Message):
             await message.answer("\u26a0\ufe0f Не удалось уведомить пользователя.")
         return
 
+    # Ввод устройства текстом
+    if user_id in REVIEW_PENDING and REVIEW_PENDING[user_id].get("step") == "device":
+        REVIEW_PENDING[user_id]["device"] = message.text.strip()
+        REVIEW_PENDING[user_id]["step"] = "text"
+        rating = REVIEW_PENDING[user_id]["rating"]
+        order_id = REVIEW_PENDING[user_id]["order_id"]
+        stars = "\u2b50" * rating
+        kb = InlineKeyboardBuilder()
+        kb.row(types.InlineKeyboardButton(text="\u27a1\ufe0f Пропустить комментарий",
+                                           callback_data=f"revnotext_{order_id}_{rating}"))
+        await message.answer(
+            f"Ты поставил {stars}\n\n\U0001f4ac Хочешь добавить комментарий? Напиши его.\n"
+            "Или нажми кнопку, чтобы пропустить.",
+            reply_markup=kb.as_markup()
+        )
+        return
+
     # Текстовый комментарий к отзыву
     if user_id in REVIEW_PENDING and REVIEW_PENDING[user_id].get("step") == "text":
         pending = REVIEW_PENDING.pop(user_id)
@@ -1095,17 +1112,11 @@ async def review_param(call: types.CallbackQuery):
     elif param == "vapor":
         REVIEW_PENDING[user_id]["step"] = "device"
         kb = InlineKeyboardBuilder()
-        kb.row(
-            types.InlineKeyboardButton(text="\U0001f4e6 Pod", callback_data=f"revdevice_Pod_{order_id}"),
-            types.InlineKeyboardButton(text="\U0001f527 Mod", callback_data=f"revdevice_Mod_{order_id}"),
-            types.InlineKeyboardButton(text="\U0001f6ac Одноразка", callback_data=f"revdevice_Odn_{order_id}")
-        )
         kb.row(types.InlineKeyboardButton(text="\u23e9 Пропустить", callback_data=f"revdevice_skip_{order_id}"))
         await call.message.edit_text(
-            "\U0001f527 <b>На чём куришь?</b>\nВыбери своё устройство:",
+            "\U0001f527 <b>На чём куришь?</b>\nНапиши название своего устройства (например: Vaporesso XROS, Voopoo Drag S):",
             reply_markup=kb.as_markup()
         )
-
 
 @dp.callback_query(F.data.startswith("revdevice_"))
 async def review_device(call: types.CallbackQuery):
