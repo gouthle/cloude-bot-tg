@@ -222,10 +222,20 @@ def init_db():
             item_name TEXT,
             flavor TEXT,
             rating INTEGER,
+            strength INTEGER DEFAULT NULL,
+            taste INTEGER DEFAULT NULL,
+            vapor INTEGER DEFAULT NULL,
+            device TEXT DEFAULT NULL,
             text TEXT DEFAULT NULL,
             date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    # Добавить колонки если таблица уже существует (миграция)
+    for col, coltype in [("strength", "INTEGER"), ("taste", "INTEGER"), ("vapor", "INTEGER"), ("device", "TEXT")]:
+        try:
+            cur.execute(f"ALTER TABLE reviews ADD COLUMN IF NOT EXISTS {col} {coltype} DEFAULT NULL")
+        except Exception:
+            pass
 
     conn.commit()
 
@@ -815,9 +825,13 @@ async def text_handler(message: types.Message):
     # Текстовый комментарий к отзыву
     if user_id in REVIEW_PENDING and REVIEW_PENDING[user_id].get("step") == "text":
         pending = REVIEW_PENDING.pop(user_id)
-        await _save_review(user_id=user_id, username=pending["username"],
-                           order_id=pending["order_id"], item_name=pending["item_name"],
-                           flavor=pending["flavor"], rating=pending["rating"], text=message.text.strip())
+        await _save_review(
+            user_id=user_id, username=pending["username"],
+            order_id=pending["order_id"], item_name=pending["item_name"],
+            flavor=pending["flavor"], rating=pending["rating"], text=message.text.strip(),
+            strength=pending.get("strength"), taste=pending.get("taste"),
+            vapor=pending.get("vapor"), device=pending.get("device")
+        )
         await message.answer("\U0001f4ac Спасибо за отзыв! Твоё мнение очень важно для нас \u2601\ufe0f",
                              reply_markup=get_main_keyboard())
         return
@@ -1000,8 +1014,8 @@ async def order_delivered(call: types.CallbackQuery):
 
     try:
         await bot.send_message(user_id,
-            f"\u2601\ufe0f <b>Как тебе заказ?</b>\n\n\U0001f4e6 {item_name} — {flavor}\n\n"
-            f"Оцени покупку — это займёт 10 секунд!",
+            f"\u2601\ufe0f <b>Как тебе заказ?</b>\n\n\U0001f4e6 <b>{item_name} — {flavor}</b>\n\n"
+            f"Сначала поставь общую оценку \U0001f447",
             reply_markup=kb.as_markup())
     except Exception:
         await call.answer("\u26a0\ufe0f Не удалось отправить запрос отзыва.", show_alert=True)
@@ -1023,15 +1037,94 @@ async def review_rating(call: types.CallbackQuery):
     item_name, flavor = row
 
     REVIEW_PENDING[call.from_user.id] = {
-        "step": "text", "order_id": order_id, "rating": rating,
+        "step": "strength", "order_id": order_id, "rating": rating,
         "item_name": item_name, "flavor": flavor,
+        "strength": None, "taste": None, "vapor": None, "device": None, "text": None,
         "username": call.from_user.username or call.from_user.first_name or "Покупатель"
     }
 
+    stars = "\u2b50" * rating
+    kb = InlineKeyboardBuilder()
+    for i in range(1, 6):
+        kb.button(text=str(i), callback_data=f"revparam_strength_{i}_{order_id}")
+    kb.adjust(5)
+    kb.row(types.InlineKeyboardButton(text="\u23e9 Пропустить всё", callback_data=f"revnotext_{order_id}_{rating}"))
+
+    await call.message.edit_text(
+        f"Ты поставил {stars}\n\n"
+        f"<b>1/3 \U0001f4a8 Крепость</b>\nОцени насколько крепкая жидкость (1 — лёгкая, 5 — очень крепкая):",
+        reply_markup=kb.as_markup()
+    )
+
+
+@dp.callback_query(F.data.startswith("revparam_"))
+async def review_param(call: types.CallbackQuery):
+    parts = call.data.split("_")
+    param, value, order_id = parts[1], int(parts[2]), int(parts[3])
+
+    user_id = call.from_user.id
+    if user_id not in REVIEW_PENDING:
+        return await call.answer("Сессия истекла, начни заново.", show_alert=True)
+
+    REVIEW_PENDING[user_id][param] = value
+
+    if param == "strength":
+        REVIEW_PENDING[user_id]["step"] = "taste"
+        kb = InlineKeyboardBuilder()
+        for i in range(1, 6):
+            kb.button(text=str(i), callback_data=f"revparam_taste_{i}_{order_id}")
+        kb.adjust(5)
+        kb.row(types.InlineKeyboardButton(text="\u23e9 Пропустить всё", callback_data=f"revnotext_{order_id}_{REVIEW_PENDING[user_id]['rating']}"))
+        await call.message.edit_text(
+            f"<b>2/3 \U0001f353 Насыщенность вкуса</b>\nОцени насколько насыщен вкус (1 — слабый, 5 — яркий):",
+            reply_markup=kb.as_markup()
+        )
+
+    elif param == "taste":
+        REVIEW_PENDING[user_id]["step"] = "vapor"
+        kb = InlineKeyboardBuilder()
+        for i in range(1, 6):
+            kb.button(text=str(i), callback_data=f"revparam_vapor_{i}_{order_id}")
+        kb.adjust(5)
+        kb.row(types.InlineKeyboardButton(text="\u23e9 Пропустить всё", callback_data=f"revnotext_{order_id}_{REVIEW_PENDING[user_id]['rating']}"))
+        await call.message.edit_text(
+            f"<b>3/3 \U0001f4a8 Густота пара</b>\nОцени количество пара (1 — мало, 5 — очень много):",
+            reply_markup=kb.as_markup()
+        )
+
+    elif param == "vapor":
+        REVIEW_PENDING[user_id]["step"] = "device"
+        kb = InlineKeyboardBuilder()
+        kb.row(
+            types.InlineKeyboardButton(text="\U0001f4e6 Pod", callback_data=f"revdevice_Pod_{order_id}"),
+            types.InlineKeyboardButton(text="\U0001f527 Mod", callback_data=f"revdevice_Mod_{order_id}"),
+            types.InlineKeyboardButton(text="\U0001f6ac Одноразка", callback_data=f"revdevice_Odn_{order_id}")
+        )
+        kb.row(types.InlineKeyboardButton(text="\u23e9 Пропустить", callback_data=f"revdevice_skip_{order_id}"))
+        await call.message.edit_text(
+            "\U0001f527 <b>На чём куришь?</b>\nВыбери своё устройство:",
+            reply_markup=kb.as_markup()
+        )
+
+
+@dp.callback_query(F.data.startswith("revdevice_"))
+async def review_device(call: types.CallbackQuery):
+    parts = call.data.split("_")
+    device_raw, order_id = parts[1], int(parts[2])
+
+    user_id = call.from_user.id
+    if user_id not in REVIEW_PENDING:
+        return await call.answer("Сессия истекла, начни заново.", show_alert=True)
+
+    device_map = {"Pod": "Pod", "Mod": "Mod", "Odn": "Одноразка", "skip": None}
+    REVIEW_PENDING[user_id]["device"] = device_map.get(device_raw)
+    REVIEW_PENDING[user_id]["step"] = "text"
+
+    rating = REVIEW_PENDING[user_id]["rating"]
+    stars = "\u2b50" * rating
     kb = InlineKeyboardBuilder()
     kb.row(types.InlineKeyboardButton(text="\u27a1\ufe0f Пропустить комментарий",
                                        callback_data=f"revnotext_{order_id}_{rating}"))
-    stars = "\u2b50" * rating
     await call.message.edit_text(
         f"Ты поставил {stars}\n\n\U0001f4ac Хочешь добавить комментарий? Напиши его.\n"
         "Или нажми кнопку, чтобы пропустить.",
@@ -1043,7 +1136,7 @@ async def review_rating(call: types.CallbackQuery):
 async def review_no_text(call: types.CallbackQuery):
     parts = call.data.split("_")
     order_id, rating = int(parts[1]), int(parts[2])
-    REVIEW_PENDING.pop(call.from_user.id, None)
+    pending = REVIEW_PENDING.pop(call.from_user.id, {})
 
     conn = get_conn()
     cur = conn.cursor()
@@ -1053,8 +1146,12 @@ async def review_no_text(call: types.CallbackQuery):
 
     item_name, flavor = row if row else ("Товар", "—")
     username = call.from_user.username or call.from_user.first_name or "Покупатель"
-    await _save_review(user_id=call.from_user.id, username=username, order_id=order_id,
-                       item_name=item_name, flavor=flavor, rating=rating, text=None)
+    await _save_review(
+        user_id=call.from_user.id, username=username, order_id=order_id,
+        item_name=item_name, flavor=flavor, rating=rating, text=None,
+        strength=pending.get("strength"), taste=pending.get("taste"),
+        vapor=pending.get("vapor"), device=pending.get("device")
+    )
     await call.message.edit_text("\U0001f4ac Спасибо за оценку! Это помогает нам становиться лучше \u2601\ufe0f")
 
 
@@ -1063,13 +1160,22 @@ async def review_skip(call: types.CallbackQuery):
     await call.message.edit_text("Хорошо! Если захочешь — оставь отзыв через \u2b50\ufe0f Отзывы \U0001f60a")
 
 
-async def _save_review(user_id, username, order_id, item_name, flavor, rating, text):
+def _format_bar(value):
+    if value is None:
+        return "—"
+    filled = "\u2588" * value
+    empty = "\u2591" * (5 - value)
+    return f"{filled}{empty} {value}/5"
+
+
+async def _save_review(user_id, username, order_id, item_name, flavor, rating, text,
+                       strength=None, taste=None, vapor=None, device=None):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO reviews (user_id, username, order_id, item_name, flavor, rating, text) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING review_id",
-        (user_id, username, order_id, item_name, flavor, rating, text)
+        "INSERT INTO reviews (user_id, username, order_id, item_name, flavor, rating, strength, taste, vapor, device, text) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING review_id",
+        (user_id, username, order_id, item_name, flavor, rating, strength, taste, vapor, device, text)
     )
     review_id = cur.fetchone()[0]
     conn.commit()
@@ -1085,7 +1191,15 @@ async def _save_review(user_id, username, order_id, item_name, flavor, rating, t
         f"\U0001f4e6 {item_name} — {flavor}\n"
         f"Оценка: {stars} ({rating}/5)\n"
     )
-    admin_text += f"\n\U0001f4ac <i>«{text}»</i>" if text else "\n\U0001f4ac <i>Без комментария</i>"
+    if any(v is not None for v in [strength, taste, vapor]):
+        admin_text += (
+            f"\n\U0001f4a8 Крепость: {_format_bar(strength)}"
+            f"\n\U0001f353 Вкус: {_format_bar(taste)}"
+            f"\n\U0001f4a8 Пар: {_format_bar(vapor)}"
+        )
+    if device:
+        admin_text += f"\n\U0001f527 Устройство: {device}"
+    admin_text += f"\n\n\U0001f4ac <i>«{text}»</i>" if text else f"\n\n\U0001f4ac <i>Без комментария</i>"
     admin_text += f"\n\n\U0001f194 Отзыв №{review_id} | Заказ №{order_id}"
 
     kb = InlineKeyboardBuilder()
@@ -1105,22 +1219,30 @@ async def review_publish(call: types.CallbackQuery):
     review_id = int(call.data.split("_")[1])
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT username, item_name, flavor, rating, text FROM reviews WHERE review_id = %s", (review_id,))
+    cur.execute("SELECT username, item_name, flavor, rating, strength, taste, vapor, device, text FROM reviews WHERE review_id = %s", (review_id,))
     row = cur.fetchone()
     conn.close()
     if not row:
         return await call.answer("Отзыв не найден", show_alert=True)
 
-    username, item_name, flavor, rating, text = row
+    username, item_name, flavor, rating, strength, taste, vapor, device, text = row
     stars = "\u2b50" * rating
     channel_text = (
         f"\u2601\ufe0f <b>Отзыв покупателя</b>\n\n"
         f"\U0001f4e6 <b>{item_name}</b> — {flavor}\n"
         f"Оценка: {stars}\n"
     )
+    if any(v is not None for v in [strength, taste, vapor]):
+        channel_text += (
+            f"\n\U0001f4a8 Крепость: {_format_bar(strength)}"
+            f"\n\U0001f353 Вкус: {_format_bar(taste)}"
+            f"\n\U0001f4a8 Пар: {_format_bar(vapor)}"
+        )
+    if device:
+        channel_text += f"\n\U0001f527 Устройство: {device}"
     if text:
-        channel_text += f"\n\U0001f4ac <i>«{text}»</i>\n"
-    channel_text += f"\n\U0001f464 @{username}"
+        channel_text += f"\n\n\U0001f4ac <i>«{text}»</i>"
+    channel_text += f"\n\n\U0001f464 @{username}"
 
     try:
         await bot.send_message(REVIEWS_CHANNEL_ID, channel_text)
