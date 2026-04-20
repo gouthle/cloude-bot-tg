@@ -31,6 +31,10 @@ TOKEN = os.getenv('BOT_TOKEN')
 ADMIN_ID_ENV = os.getenv('ADMIN_ID')
 ADMIN = int(ADMIN_ID_ENV) if ADMIN_ID_ENV else None
 
+# ID канала с отзывами (добавь в .env как REVIEWS_CHANNEL_ID=-100xxxxxxxxxx)
+REVIEWS_CHANNEL_ID_ENV = os.getenv('REVIEWS_CHANNEL_ID')
+REVIEWS_CHANNEL_ID = int(REVIEWS_CHANNEL_ID_ENV) if REVIEWS_CHANNEL_ID_ENV else None
+
 PHONE_NUMBER = "+48 123 456 789"  # ЗАМЕНИ НА СВОЙ НОМЕР BLIK
 REVIEWS_URL = "https://t.me/+cbqxYZH0tzE4MDUy"
 
@@ -87,7 +91,6 @@ def set_stock(brand: str, flavor: str, quantity: int):
     conn.close()
 
 def decrement_stock(brand: str, flavor: str) -> int:
-    """Списывает 1 шт. и возвращает новый остаток."""
     conn = sqlite3.connect('cloude_base.db')
     conn.execute(
         "UPDATE stock SET quantity = MAX(0, quantity - 1) WHERE brand = ? AND flavor = ?",
@@ -180,6 +183,21 @@ def init_db():
         )
     ''')
 
+    # ✅ НОВАЯ ТАБЛИЦА: отзывы
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS reviews (
+            review_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            username TEXT,
+            order_id INTEGER,
+            item_name TEXT,
+            flavor TEXT,
+            rating INTEGER,
+            text TEXT DEFAULT NULL,
+            date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
     conn.commit()
     conn.close()
 
@@ -217,6 +235,8 @@ TRACK_PENDING = {}
 PAYMENT_PENDING = {}
 # Словарь для пошагового сбора данных InPost: {user_id: {step, order_id, data}}
 INPOST_COLLECT = {}
+# Словарь для сбора отзыва: {user_id: {order_id, rating, item_name, flavor, username}}
+REVIEW_PENDING = {}
 
 # --- ЧАСТЬ 6: ХЕНДЛЕРЫ МЕНЮ ---
 
@@ -640,7 +660,6 @@ async def finish_callback(call: types.CallbackQuery):
 
 async def _create_order(bot, user_id, username, brand_name, flavor, total, delivery,
                         bonus_used, photo_id, message, is_callback=False):
-    """Создаёт заказ в БД и запускает сбор данных или уведомляет админа."""
     db = sqlite3.connect('cloude_base.db')
     cur = db.cursor()
     cur.execute(
@@ -656,7 +675,6 @@ async def _create_order(bot, user_id, username, brand_name, flavor, total, deliv
         spend_balance(user_id, bonus_used)
 
     if delivery == "InPost":
-        # Запускаем пошаговый сбор данных InPost
         INPOST_COLLECT[user_id] = {
             "step": "name",
             "order_id": order_id,
@@ -674,7 +692,6 @@ async def _create_order(bot, user_id, username, brand_name, flavor, total, deliv
         else:
             await bot.send_message(user_id, text)
     else:
-        # GRATIS — сразу уведомляем админа
         if ADMIN:
             kb = InlineKeyboardBuilder()
             kb.row(
@@ -683,6 +700,10 @@ async def _create_order(bot, user_id, username, brand_name, flavor, total, deliv
             )
             kb.row(
                 types.InlineKeyboardButton(text="🚚 Отправить трек", callback_data=f"track_{order_id}_{user_id}")
+            )
+            # ✅ Новая кнопка "Доставлено"
+            kb.row(
+                types.InlineKeyboardButton(text="📦 Доставлено", callback_data=f"delivered_{order_id}_{user_id}")
             )
             admin_text = (
                 f"⚡️ <b>НОВЫЙ ЗАКАЗ (GRATIS)</b>\n"
@@ -723,12 +744,10 @@ async def back_to_cats(call: types.CallbackQuery):
 
 @dp.message(F.photo)
 async def photo_handler(message: types.Message):
-    # Хелпер ID фото для админа
     if ADMIN and message.from_user.id == ADMIN and message.from_user.id not in PAYMENT_PENDING:
         await message.answer(f"ID фото для кода:\n<code>{message.photo[-1].file_id}</code>")
         return
 
-    # Скриншот оплаты от пользователя
     if message.from_user.id in PAYMENT_PENDING:
         pending = PAYMENT_PENDING.pop(message.from_user.id)
         delivery_code = pending["delivery_code"]
@@ -807,6 +826,25 @@ async def text_handler(message: types.Message):
             await message.answer("⚠️ Не удалось уведомить пользователя.")
         return
 
+    # ✅ Текстовый комментарий к отзыву
+    if user_id in REVIEW_PENDING and REVIEW_PENDING[user_id].get("step") == "text":
+        pending = REVIEW_PENDING.pop(user_id)
+        review_text = message.text.strip()
+        await _save_review(
+            user_id=user_id,
+            username=pending["username"],
+            order_id=pending["order_id"],
+            item_name=pending["item_name"],
+            flavor=pending["flavor"],
+            rating=pending["rating"],
+            text=review_text
+        )
+        await message.answer(
+            "💬 Спасибо за отзыв! Твоё мнение очень важно для нас ☁️",
+            reply_markup=get_main_keyboard()
+        )
+        return
+
     # Пошаговый сбор данных InPost
     if user_id in INPOST_COLLECT:
         collect = INPOST_COLLECT[user_id]
@@ -867,6 +905,10 @@ async def text_handler(message: types.Message):
                 kb.row(
                     types.InlineKeyboardButton(text="🚚 Отправить трек", callback_data=f"track_{order_id}_{user_id}")
                 )
+                # ✅ Новая кнопка "Доставлено"
+                kb.row(
+                    types.InlineKeyboardButton(text="📦 Доставлено", callback_data=f"delivered_{order_id}_{user_id}")
+                )
                 admin_text = (
                     f"💰 <b>НОВЫЙ ЗАКАЗ (InPost)</b>\n"
                     f"👤 @{username} (<code>{user_id}</code>)\n"
@@ -883,7 +925,6 @@ async def text_handler(message: types.Message):
                     await bot.send_message(ADMIN, admin_text, reply_markup=kb.as_markup())
         return
 
-    # Если не в процессе заказа
     await message.answer("Используй кнопки меню для заказа. Если есть вопросы — пиши в поддержку.")
 
 
@@ -973,6 +1014,229 @@ async def send_track_number(call: types.CallbackQuery):
 
     TRACK_PENDING[call.from_user.id] = (order_id, user_id)
     await call.answer("Отправь трек-номер следующим сообщением.", show_alert=True)
+
+
+# --- ЧАСТЬ 11: СИСТЕМА ОТЗЫВОВ ---
+
+@dp.callback_query(F.data.startswith("delivered_"))
+async def order_delivered(call: types.CallbackQuery):
+    """Админ отмечает заказ как доставленный — клиенту уходит запрос отзыва."""
+    if call.from_user.id != ADMIN:
+        return await call.answer("⛔️ Нет доступа.", show_alert=True)
+
+    parts = call.data.split("_")
+    order_id, user_id = int(parts[1]), int(parts[2])
+
+    db = sqlite3.connect('cloude_base.db')
+    row = db.execute(
+        "SELECT item_name, flavor, status FROM orders WHERE order_id = ?", (order_id,)
+    ).fetchone()
+
+    if not row:
+        db.close()
+        return await call.answer("Заказ не найден", show_alert=True)
+
+    item_name, flavor, status = row
+
+    if status == "Доставлен":
+        db.close()
+        return await call.answer("Заказ уже отмечен как доставленный!", show_alert=True)
+
+    db.execute("UPDATE orders SET status = 'Доставлен' WHERE order_id = ?", (order_id,))
+    db.commit()
+    db.close()
+
+    await call.message.edit_text(call.message.text + "\n\n📦 <b>Доставлено!</b> Запрос отзыва отправлен клиенту.")
+
+    # Отправляем клиенту запрос на отзыв
+    kb = InlineKeyboardBuilder()
+    stars = ["⭐", "⭐⭐", "⭐⭐⭐", "⭐⭐⭐⭐", "⭐⭐⭐⭐⭐"]
+    for i, s in enumerate(stars, 1):
+        kb.button(text=s, callback_data=f"revrate_{i}_{order_id}")
+    kb.adjust(5)
+    kb.row(types.InlineKeyboardButton(text="🙅 Пропустить", callback_data=f"revskip_{order_id}"))
+
+    try:
+        await bot.send_message(
+            user_id,
+            f"☁️ <b>Как тебе заказ?</b>\n\n"
+            f"📦 {item_name} — {flavor}\n\n"
+            f"Оцени свою покупку — это займёт 10 секунд и поможет другим покупателям!",
+            reply_markup=kb.as_markup()
+        )
+    except Exception:
+        await call.answer("⚠️ Не удалось отправить запрос отзыва клиенту.", show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("revrate_"))
+async def review_rating(call: types.CallbackQuery):
+    """Клиент выбрал оценку в звёздах."""
+    parts = call.data.split("_")
+    rating = int(parts[1])
+    order_id = int(parts[2])
+
+    db = sqlite3.connect('cloude_base.db')
+    row = db.execute(
+        "SELECT item_name, flavor FROM orders WHERE order_id = ?", (order_id,)
+    ).fetchone()
+    db.close()
+
+    if not row:
+        return await call.answer("Заказ не найден", show_alert=True)
+
+    item_name, flavor = row
+    stars_display = "⭐" * rating
+
+    # Сохраняем в pending, ждём текстовый комментарий
+    REVIEW_PENDING[call.from_user.id] = {
+        "step": "text",
+        "order_id": order_id,
+        "rating": rating,
+        "item_name": item_name,
+        "flavor": flavor,
+        "username": call.from_user.username or call.from_user.first_name or "Покупатель"
+    }
+
+    kb = InlineKeyboardBuilder()
+    kb.row(types.InlineKeyboardButton(text="➡️ Пропустить комментарий", callback_data=f"revnotext_{order_id}_{rating}"))
+
+    await call.message.edit_text(
+        f"Ты поставил {stars_display}\n\n"
+        f"💬 Хочешь добавить комментарий? Напиши его следующим сообщением.\n"
+        f"Или нажми кнопку ниже, чтобы пропустить.",
+        reply_markup=kb.as_markup()
+    )
+
+
+@dp.callback_query(F.data.startswith("revnotext_"))
+async def review_no_text(call: types.CallbackQuery):
+    """Клиент пропустил текстовый комментарий."""
+    parts = call.data.split("_")
+    order_id = int(parts[1])
+    rating = int(parts[2])
+
+    REVIEW_PENDING.pop(call.from_user.id, None)
+
+    db = sqlite3.connect('cloude_base.db')
+    row = db.execute(
+        "SELECT item_name, flavor FROM orders WHERE order_id = ?", (order_id,)
+    ).fetchone()
+    db.close()
+
+    item_name, flavor = row if row else ("Товар", "—")
+    username = call.from_user.username or call.from_user.first_name or "Покупатель"
+
+    await _save_review(
+        user_id=call.from_user.id,
+        username=username,
+        order_id=order_id,
+        item_name=item_name,
+        flavor=flavor,
+        rating=rating,
+        text=None
+    )
+    await call.message.edit_text("💬 Спасибо за оценку! Это помогает нам становиться лучше ☁️")
+
+
+@dp.callback_query(F.data.startswith("revskip_"))
+async def review_skip(call: types.CallbackQuery):
+    """Клиент полностью пропустил отзыв."""
+    await call.message.edit_text("Хорошо, если захочешь — можешь оставить отзыв в любое время в разделе ⭐️ Отзывы 😊")
+
+
+async def _save_review(user_id: int, username: str, order_id: int, item_name: str,
+                       flavor: str, rating: int, text: str | None):
+    """Сохраняет отзыв в БД и уведомляет админа."""
+    db = sqlite3.connect('cloude_base.db')
+    cur = db.cursor()
+    cur.execute(
+        "INSERT INTO reviews (user_id, username, order_id, item_name, flavor, rating, text) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (user_id, username, order_id, item_name, flavor, rating, text)
+    )
+    review_id = cur.lastrowid
+    db.commit()
+    db.close()
+
+    if not ADMIN:
+        return
+
+    stars_display = "⭐" * rating
+    admin_text = (
+        f"💬 <b>Новый отзыв!</b>\n\n"
+        f"👤 @{username} (<code>{user_id}</code>)\n"
+        f"📦 {item_name} — {flavor}\n"
+        f"Оценка: {stars_display} ({rating}/5)\n"
+    )
+    if text:
+        admin_text += f"\n💬 <i>«{text}»</i>"
+    else:
+        admin_text += "\n💬 <i>Без комментария</i>"
+    admin_text += f"\n\n🆔 Отзыв №{review_id} | Заказ №{order_id}"
+
+    kb = InlineKeyboardBuilder()
+    if REVIEWS_CHANNEL_ID:
+        kb.row(types.InlineKeyboardButton(
+            text="📢 Опубликовать в канал",
+            callback_data=f"revpub_{review_id}"
+        ))
+    kb.row(types.InlineKeyboardButton(
+        text="🗑 Не публиковать",
+        callback_data=f"revdel_{review_id}"
+    ))
+
+    await bot.send_message(ADMIN, admin_text, reply_markup=kb.as_markup())
+
+
+@dp.callback_query(F.data.startswith("revpub_"))
+async def review_publish(call: types.CallbackQuery):
+    """Админ публикует отзыв в канал."""
+    if call.from_user.id != ADMIN:
+        return await call.answer("⛔️ Нет доступа.", show_alert=True)
+
+    if not REVIEWS_CHANNEL_ID:
+        return await call.answer("⚠️ REVIEWS_CHANNEL_ID не задан в .env!", show_alert=True)
+
+    review_id = int(call.data.split("_")[1])
+
+    db = sqlite3.connect('cloude_base.db')
+    row = db.execute(
+        "SELECT username, item_name, flavor, rating, text FROM reviews WHERE review_id = ?",
+        (review_id,)
+    ).fetchone()
+    db.close()
+
+    if not row:
+        return await call.answer("Отзыв не найден", show_alert=True)
+
+    username, item_name, flavor, rating, text = row
+    stars_display = "⭐" * rating
+
+    # Красиво оформленный пост для канала
+    channel_text = (
+        f"☁️ <b>Отзыв покупателя</b>\n\n"
+        f"📦 <b>{item_name}</b> — {flavor}\n"
+        f"Оценка: {stars_display}\n"
+    )
+    if text:
+        channel_text += f"\n💬 <i>«{text}»</i>\n"
+    channel_text += f"\n👤 @{username}"
+
+    try:
+        await bot.send_message(REVIEWS_CHANNEL_ID, channel_text)
+        await call.message.edit_text(
+            call.message.text + "\n\n✅ <b>Опубликовано в канал!</b>"
+        )
+    except Exception as e:
+        await call.answer(f"Ошибка публикации: {e}", show_alert=True)
+
+
+@dp.callback_query(F.data.startswith("revdel_"))
+async def review_delete(call: types.CallbackQuery):
+    """Админ решил не публиковать отзыв."""
+    if call.from_user.id != ADMIN:
+        return await call.answer("⛔️ Нет доступа.", show_alert=True)
+    await call.message.edit_text(call.message.text + "\n\n🗑 <b>Не опубликован.</b>")
 
 
 # --- ЗАПУСК ---
