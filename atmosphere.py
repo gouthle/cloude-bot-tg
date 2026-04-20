@@ -135,7 +135,6 @@ def init_db():
             balance INTEGER DEFAULT 0
         )
     ''')
-    # Добавляем колонку balance если её нет (для существующих БД)
     try:
         cur.execute("ALTER TABLE users ADD COLUMN balance INTEGER DEFAULT 0")
     except sqlite3.OperationalError:
@@ -152,12 +151,16 @@ def init_db():
             info TEXT,
             status TEXT DEFAULT "Ожидает оплаты",
             track_number TEXT DEFAULT NULL,
+            photo_id TEXT DEFAULT NULL,
             date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    # Добавляем колонку track_number если её нет
     try:
         cur.execute("ALTER TABLE orders ADD COLUMN track_number TEXT DEFAULT NULL")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cur.execute("ALTER TABLE orders ADD COLUMN photo_id TEXT DEFAULT NULL")
     except sqlite3.OperationalError:
         pass
 
@@ -212,6 +215,8 @@ BROADCAST_PENDING = set()
 TRACK_PENDING = {}
 # Словарь для ожидающих скриншот оплаты
 PAYMENT_PENDING = {}
+# Словарь для пошагового сбора данных InPost: {user_id: {step, order_id, data}}
+INPOST_COLLECT = {}
 
 # --- ЧАСТЬ 6: ХЕНДЛЕРЫ МЕНЮ ---
 
@@ -244,7 +249,6 @@ async def start_handler(message: types.Message):
     db.commit()
     db.close()
 
-    # Начисляем бонус рефереру если это новый юзер
     if is_new and referrer_id and referrer_id != message.from_user.id:
         db = sqlite3.connect('cloude_base.db')
         already = db.execute(
@@ -589,7 +593,6 @@ async def payment_callback(call: types.CallbackQuery):
     ))
     keyboard.row(types.InlineKeyboardButton(text="❌ Отменить", callback_data="back_to_cats"))
 
-    # Сохраняем ожидание скриншота
     PAYMENT_PENDING[call.from_user.id] = {
         "delivery_code": delivery_code,
         "brand_idx": brand_idx,
@@ -635,13 +638,15 @@ async def finish_callback(call: types.CallbackQuery):
     )
 
 
-async def _create_order(bot, user_id, username, brand_name, flavor, total, delivery, bonus_used, photo_id, message, is_callback=False):
-    """Создаёт заказ в БД и уведомляет админа."""
+async def _create_order(bot, user_id, username, brand_name, flavor, total, delivery,
+                        bonus_used, photo_id, message, is_callback=False):
+    """Создаёт заказ в БД и запускает сбор данных или уведомляет админа."""
     db = sqlite3.connect('cloude_base.db')
     cur = db.cursor()
     cur.execute(
-        "INSERT INTO orders (user_id, item_name, flavor, total, delivery, info, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (user_id, brand_name, flavor, total, delivery, "Ожидаем данные InPost", "WAIT_DATA")
+        "INSERT INTO orders (user_id, item_name, flavor, total, delivery, info, status, photo_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (user_id, brand_name, flavor, total, delivery, "", "WAIT_DATA", photo_id)
     )
     order_id = cur.lastrowid
     db.commit()
@@ -651,17 +656,25 @@ async def _create_order(bot, user_id, username, brand_name, flavor, total, deliv
         spend_balance(user_id, bonus_used)
 
     if delivery == "InPost":
+        # Запускаем пошаговый сбор данных InPost
+        INPOST_COLLECT[user_id] = {
+            "step": "name",
+            "order_id": order_id,
+            "name": "",
+            "phone": "",
+            "email": "",
+            "paczkomat": ""
+        }
         text = (
-            "📝 <b>Важно!</b>\nПришли следующим сообщением данные для InPost:\n"
-            "1. Твои ФИО\n"
-            "2. Номер телефона\n"
-            "3. Код пачкомата (напр. KRA01M)"
+            "📝 <b>Данные для InPost</b>\n\n"
+            "Шаг 1/4 — Напиши своё <b>полное имя и фамилию</b>:"
         )
         if is_callback:
             await message.edit_text(text)
         else:
             await bot.send_message(user_id, text)
     else:
+        # GRATIS — сразу уведомляем админа
         if ADMIN:
             kb = InlineKeyboardBuilder()
             kb.row(
@@ -679,10 +692,8 @@ async def _create_order(bot, user_id, username, brand_name, flavor, total, deliv
             )
             if bonus_used > 0:
                 admin_text += f" (скидка -{bonus_used}zł)"
-            admin_text += (
-                f"\n🚚 Доставка: {delivery}\n"
-                f"🆔 Заказ №{order_id}"
-            )
+            admin_text += f"\n🚚 Доставка: {delivery}\n🆔 Заказ №{order_id}"
+
             if photo_id:
                 await bot.send_photo(ADMIN, photo_id, caption=admin_text, reply_markup=kb.as_markup())
             else:
@@ -712,7 +723,7 @@ async def back_to_cats(call: types.CallbackQuery):
 
 @dp.message(F.photo)
 async def photo_handler(message: types.Message):
-    # Хелпер ID фото для админа (если не ждём скриншот)
+    # Хелпер ID фото для админа
     if ADMIN and message.from_user.id == ADMIN and message.from_user.id not in PAYMENT_PENDING:
         await message.answer(f"ID фото для кода:\n<code>{message.photo[-1].file_id}</code>")
         return
@@ -738,7 +749,7 @@ async def photo_handler(message: types.Message):
         photo_id = message.photo[-1].file_id
         username = message.from_user.username or "без ника"
 
-        await message.answer("✅ Скриншот получен! Ожидай подтверждения менеджера.")
+        await message.answer("✅ Скриншот получен! Сейчас заполним данные для доставки.")
         await _create_order(
             bot=bot,
             user_id=message.from_user.id,
@@ -796,54 +807,84 @@ async def text_handler(message: types.Message):
             await message.answer("⚠️ Не удалось уведомить пользователя.")
         return
 
-    # Данные InPost от покупателя
-    db = sqlite3.connect('cloude_base.db')
-    cursor = db.cursor()
-    cursor.execute(
-        "SELECT order_id, item_name, flavor, total FROM orders WHERE user_id = ? AND status = 'WAIT_DATA' ORDER BY date DESC LIMIT 1",
-        (user_id,)
-    )
-    order = cursor.fetchone()
+    # Пошаговый сбор данных InPost
+    if user_id in INPOST_COLLECT:
+        collect = INPOST_COLLECT[user_id]
+        step = collect["step"]
 
-    if order:
-        order_id, item, flavor, total = order
-        cursor.execute(
-            "UPDATE orders SET info = ?, status = 'Ожидает подтверждения' WHERE order_id = ?",
-            (message.text, order_id)
-        )
-        db.commit()
-        db.close()
+        if step == "name":
+            collect["name"] = message.text.strip()
+            collect["step"] = "phone"
+            await message.answer("📞 Шаг 2/4 — Напиши свой <b>номер телефона</b>:")
 
-        await message.answer(
-            "✅ <b>Данные получены!</b>\nМенеджер проверит оплату и отправит твой заказ. Спасибо, что выбрал Cloude!"
-        )
+        elif step == "phone":
+            collect["phone"] = message.text.strip()
+            collect["step"] = "email"
+            await message.answer("📧 Шаг 3/4 — Напиши свой <b>email</b>:")
 
-        if ADMIN:
-            username = message.from_user.username or "без ника"
-            kb = InlineKeyboardBuilder()
-            kb.row(
-                types.InlineKeyboardButton(text="✅ Оплата пришла", callback_data=f"confirm_{order_id}_{user_id}"),
-                types.InlineKeyboardButton(text="❌ Не пришла", callback_data=f"reject_{order_id}_{user_id}")
+        elif step == "email":
+            collect["email"] = message.text.strip()
+            collect["step"] = "paczkomat"
+            await message.answer("📦 Шаг 4/4 — Напиши <b>код пачкомата</b> (напр. KRA01M):")
+
+        elif step == "paczkomat":
+            collect["paczkomat"] = message.text.strip()
+            INPOST_COLLECT.pop(user_id)
+
+            order_id = collect["order_id"]
+            info_text = (
+                f"Имя: {collect['name']}\n"
+                f"Телефон: {collect['phone']}\n"
+                f"Email: {collect['email']}\n"
+                f"Пачкомат: {collect['paczkomat']}"
             )
-            kb.row(
-                types.InlineKeyboardButton(text="🚚 Отправить трек", callback_data=f"track_{order_id}_{user_id}")
+
+            db = sqlite3.connect('cloude_base.db')
+            row = db.execute(
+                "SELECT item_name, flavor, total, photo_id FROM orders WHERE order_id = ?",
+                (order_id,)
+            ).fetchone()
+            db.execute(
+                "UPDATE orders SET info = ?, status = 'Ожидает подтверждения' WHERE order_id = ?",
+                (info_text, order_id)
             )
-            await bot.send_message(
-                ADMIN,
-                f"💰 <b>НОВЫЙ ЗАКАЗ (InPost)</b>\n"
-                f"👤 @{username} (<code>{user_id}</code>)\n"
-                f"📦 {item} — {flavor}\n"
-                f"💵 Сумма: <b>{total}zł</b>\n"
-                f"🚚 Доставка: InPost\n"
-                f"📋 Данные: {message.text}\n"
-                f"🆔 Заказ №{order_id}",
-                reply_markup=kb.as_markup()
+            db.commit()
+            db.close()
+
+            await message.answer(
+                "✅ <b>Все данные получены!</b>\n"
+                "Менеджер проверит оплату и отправит твой заказ. Спасибо, что выбрал Cloude! ☁️"
             )
-    else:
-        db.close()
-        await message.answer(
-            "Используй кнопки меню для заказа. Если есть вопросы — пиши в поддержку."
-        )
+
+            if ADMIN and row:
+                item, flavor, total, saved_photo = row
+                username = message.from_user.username or "без ника"
+                kb = InlineKeyboardBuilder()
+                kb.row(
+                    types.InlineKeyboardButton(text="✅ Оплата пришла", callback_data=f"confirm_{order_id}_{user_id}"),
+                    types.InlineKeyboardButton(text="❌ Не пришла", callback_data=f"reject_{order_id}_{user_id}")
+                )
+                kb.row(
+                    types.InlineKeyboardButton(text="🚚 Отправить трек", callback_data=f"track_{order_id}_{user_id}")
+                )
+                admin_text = (
+                    f"💰 <b>НОВЫЙ ЗАКАЗ (InPost)</b>\n"
+                    f"👤 @{username} (<code>{user_id}</code>)\n"
+                    f"📦 {item} — {flavor}\n"
+                    f"💵 Сумма: <b>{total}zł</b>\n"
+                    f"🚚 Доставка: InPost\n\n"
+                    f"📋 <b>Данные доставки:</b>\n{info_text}\n\n"
+                    f"🆔 Заказ №{order_id}"
+                )
+                if saved_photo:
+                    await bot.send_photo(ADMIN, saved_photo, caption=admin_text, reply_markup=kb.as_markup())
+                else:
+                    admin_text += "\n📸 Скриншот: не прислан"
+                    await bot.send_message(ADMIN, admin_text, reply_markup=kb.as_markup())
+        return
+
+    # Если не в процессе заказа
+    await message.answer("Используй кнопки меню для заказа. Если есть вопросы — пиши в поддержку.")
 
 
 # --- ЧАСТЬ 10: ПОДТВЕРЖДЕНИЕ / ОТКЛОНЕНИЕ / ТРЕК ---
@@ -877,7 +918,6 @@ async def confirm_order(call: types.CallbackQuery):
 
     new_qty = decrement_stock(item_name, flavor)
 
-    # Уведомление если товар заканчивается
     if new_qty <= LOW_STOCK_THRESHOLD and ADMIN:
         await bot.send_message(
             ADMIN,
