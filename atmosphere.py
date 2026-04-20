@@ -279,9 +279,9 @@ async def set_main_menu_button(bot: Bot):
 
 def get_main_keyboard():
     builder = ReplyKeyboardBuilder()
-    builder.row(types.KeyboardButton(text="☁️ Витрина"), types.KeyboardButton(text="📥 Мои заказы"))
-    builder.row(types.KeyboardButton(text="💰 Бонусы"), types.KeyboardButton(text="⭐️ Отзывы"))
-    builder.row(types.KeyboardButton(text="🤝 Поддержка"))
+    builder.row(types.KeyboardButton(text="\u2601\ufe0f Витрина"), types.KeyboardButton(text="\U0001f4e5 Мои заказы"))
+    builder.row(types.KeyboardButton(text="\U0001f4b0 Бонусы"), types.KeyboardButton(text="\u2b50\ufe0f Отзывы"))
+    builder.row(types.KeyboardButton(text="\U0001f91d Поддержка"))
     return builder.as_markup(resize_keyboard=True)
 
 BROADCAST_PENDING = set()
@@ -336,8 +336,8 @@ async def start_handler(message: types.Message):
             try:
                 await bot.send_message(
                     referrer_id,
-                    f"🎉 По твоей ссылке зарегистрировался новый пользователь!\n"
-                    f"На твой счёт начислено <b>+{REFERRAL_BONUS}zł</b> бонусов 💰"
+                    f"\U0001f389 По твоей ссылке зарегистрировался новый пользователь!\n"
+                    f"На твой счёт начислено <b>+{REFERRAL_BONUS}zł</b> бонусов \U0001f4b0"
                 )
             except Exception:
                 pass
@@ -345,23 +345,23 @@ async def start_handler(message: types.Message):
             conn.close()
 
     welcome_text = (
-        f"Salute, <b>{message.from_user.first_name}</b>! 👋\n\n"
+        f"Salute, <b>{message.from_user.first_name}</b>! \U0001f44b\n\n"
         "Ты попал в <b>Cloude Atmosphere</b>. Самое лучшее качество у нас!\n\n"
         "Пользуйся меню снизу, чтобы сделать заказ. Если возникнут вопросы — жми 'Поддержка'."
     )
     await message.answer(welcome_text, reply_markup=get_main_keyboard())
 
 
-@dp.message(F.text == "☁️ Витрина")
+@dp.message(F.text == "\u2601\ufe0f Витрина")
 async def catalog_handler(message: types.Message):
     keyboard = InlineKeyboardBuilder()
     for brand in BRAND_LIST:
         idx = brand_to_idx(brand)
         keyboard.row(types.InlineKeyboardButton(text=brand, callback_data=f"brn_{idx}"))
-    await message.answer("✨ <b>Каталог продукции</b>\nВыбери бренд:", reply_markup=keyboard.as_markup())
+    await message.answer("\u2728 <b>Каталог продукции</b>\nВыбери бренд:", reply_markup=keyboard.as_markup())
 
 
-@dp.message(F.text == "💰 Бонусы")
+@dp.message(F.text == "\U0001f4b0 Бонусы")
 async def bonus_handler(message: types.Message):
     balance = get_balance(message.from_user.id)
     link = await create_start_link(bot, str(message.from_user.id), encode=True)
@@ -373,22 +373,22 @@ async def bonus_handler(message: types.Message):
     conn.close()
 
     await message.answer(
-        f"💰 <b>Твой баланс: {balance}zł</b>\n\n"
-        f"👥 Приглашено друзей: <b>{ref_count}</b>\n"
-        f"🎁 За каждого друга: <b>+{REFERRAL_BONUS}zł</b>\n\n"
+        f"\U0001f4b0 <b>Твой баланс: {balance}zł</b>\n\n"
+        f"\U0001f465 Приглашено друзей: <b>{ref_count}</b>\n"
+        f"\U0001f381 За каждого друга: <b>+{REFERRAL_BONUS}zł</b>\n\n"
         f"Бонусы можно потратить при оформлении заказа!\n\n"
         f"<b>Твоя реферальная ссылка:</b>\n<code>{link}</code>"
     )
 
 
-@dp.message(F.text == "⭐️ Отзывы")
+@dp.message(F.text == "\u2b50\ufe0f Отзывы")
 async def reviews_handler(message: types.Message):
     keyboard = InlineKeyboardBuilder()
-    keyboard.row(types.InlineKeyboardButton(text="📖 Перейти в канал", url=REVIEWS_URL))
-    await message.answer("Честные отзывы наших покупателей здесь 👇", reply_markup=keyboard.as_markup())
+    keyboard.row(types.InlineKeyboardButton(text="\U0001f4d6 Перейти в канал", url=REVIEWS_URL))
+    await message.answer("Честные отзывы наших покупателей здесь \U0001f447", reply_markup=keyboard.as_markup())
 
 
-@dp.message(F.text == "📥 Мои заказы")
+@dp.message(F.text == "\U0001f4e5 Мои заказы")
 async def my_orders_handler(message: types.Message):
     conn = get_conn()
     cur = conn.cursor()
@@ -403,18 +403,18 @@ async def my_orders_handler(message: types.Message):
     if not rows:
         return await message.answer("У тебя пока нет заказов.")
 
-    text = "📜 <b>Последние заказы:</b>\n\n"
+    text = "\U0001f4dc <b>Последние заказы:</b>\n\n"
     for item, flav, tot, stat, track in rows:
-        text += f"▪️ {item} ({flav}) — {tot}zł\nСтатус: <b>{stat}</b>"
+        text += f"\u25aa\ufe0f {item} ({flav}) — {tot}zł\nСтатус: <b>{stat}</b>"
         if track:
-            text += f"\n📦 Трек: <code>{track}</code>"
+            text += f"\n\U0001f4e6 Трек: <code>{track}</code>"
         text += "\n\n"
     await message.answer(text)
 
 
-@dp.message(F.text == "🤝 Поддержка")
+@dp.message(F.text == "\U0001f91d Поддержка")
 async def support_handler(message: types.Message):
-    await message.answer("Связь с менеджером: @твой_ник\nПиши по любым вопросам! 🚀")
+    await message.answer("Связь с менеджером: @твой_ник\nПиши по любым вопросам! \U0001f680")
 
 
 # --- ЧАСТЬ 7: АДМИН-ПАНЕЛЬ СКЛАДА ---
@@ -426,45 +426,45 @@ def get_admin_stock_keyboard(brand_idx: str):
 
     for i, flavor in enumerate(brand_data.get("flavors", [])):
         qty = get_stock(brand_name, flavor)
-        status = f"✅ {qty} шт." if qty > 0 else "❌ Sold Out"
+        status = f"\u2705 {qty} шт." if qty > 0 else "\u274c Sold Out"
         keyboard.row(types.InlineKeyboardButton(text=f"{flavor} — {status}", callback_data="noop"))
         keyboard.row(
-            types.InlineKeyboardButton(text="➖1", callback_data=f"adm_m_{brand_idx}_{i}"),
-            types.InlineKeyboardButton(text="➕1", callback_data=f"adm_p_{brand_idx}_{i}"),
-            types.InlineKeyboardButton(text="➕5", callback_data=f"adm_p5_{brand_idx}_{i}"),
-            types.InlineKeyboardButton(text="🔄 Сброс", callback_data=f"adm_r_{brand_idx}_{i}"),
+            types.InlineKeyboardButton(text="\u2796" + "1", callback_data=f"adm_m_{brand_idx}_{i}"),
+            types.InlineKeyboardButton(text="\u2795" + "1", callback_data=f"adm_p_{brand_idx}_{i}"),
+            types.InlineKeyboardButton(text="\u2795" + "5", callback_data=f"adm_p5_{brand_idx}_{i}"),
+            types.InlineKeyboardButton(text="\U0001f504 Сброс", callback_data=f"adm_r_{brand_idx}_{i}"),
         )
 
-    keyboard.row(types.InlineKeyboardButton(text="⬅️ К брендам", callback_data="adm_brands"))
+    keyboard.row(types.InlineKeyboardButton(text="\u2b05\ufe0f К брендам", callback_data="adm_brands"))
     return keyboard.as_markup()
 
 def get_admin_brands_keyboard():
     keyboard = InlineKeyboardBuilder()
     for brand in BRAND_LIST:
         idx = brand_to_idx(brand)
-        keyboard.row(types.InlineKeyboardButton(text=f"📦 {brand}", callback_data=f"adm_b_{idx}"))
-    keyboard.row(types.InlineKeyboardButton(text="📢 Рассылка", callback_data="adm_broadcast"))
+        keyboard.row(types.InlineKeyboardButton(text=f"\U0001f4e6 {brand}", callback_data=f"adm_b_{idx}"))
+    keyboard.row(types.InlineKeyboardButton(text="\U0001f4e2 Рассылка", callback_data="adm_broadcast"))
     return keyboard.as_markup()
 
 @dp.message(Command("admin"))
 async def admin_panel(message: types.Message):
     if message.from_user.id != ADMIN:
-        return await message.answer("⛔️ Нет доступа.")
-    await message.answer("⚙️ <b>Админ-панель</b>\n\nВыбери раздел:", reply_markup=get_admin_brands_keyboard())
+        return await message.answer("\u26d4\ufe0f Нет доступа.")
+    await message.answer("\u2699\ufe0f <b>Админ-панель</b>\n\nВыбери раздел:", reply_markup=get_admin_brands_keyboard())
 
 @dp.callback_query(F.data == "adm_brands")
 async def adm_brands(call: types.CallbackQuery):
     if call.from_user.id != ADMIN:
-        return await call.answer("⛔️ Нет доступа.", show_alert=True)
-    await call.message.edit_text("⚙️ <b>Админ-панель</b>\n\nВыбери раздел:", reply_markup=get_admin_brands_keyboard())
+        return await call.answer("\u26d4\ufe0f Нет доступа.", show_alert=True)
+    await call.message.edit_text("\u2699\ufe0f <b>Админ-панель</b>\n\nВыбери раздел:", reply_markup=get_admin_brands_keyboard())
 
 @dp.callback_query(F.data == "adm_broadcast")
 async def adm_broadcast_start(call: types.CallbackQuery):
     if call.from_user.id != ADMIN:
-        return await call.answer("⛔️ Нет доступа.", show_alert=True)
+        return await call.answer("\u26d4\ufe0f Нет доступа.", show_alert=True)
     BROADCAST_PENDING.add(call.from_user.id)
     await call.message.edit_text(
-        "📢 <b>Рассылка</b>\n\nОтправь следующим сообщением текст рассылки.\n"
+        "\U0001f4e2 <b>Рассылка</b>\n\nОтправь следующим сообщением текст рассылки.\n"
         "Поддерживается HTML-разметка: <b>жирный</b>, <i>курсив</i>, <code>код</code>.\n\n"
         "Для отмены напиши /admin"
     )
@@ -472,11 +472,11 @@ async def adm_broadcast_start(call: types.CallbackQuery):
 @dp.callback_query(F.data.startswith("adm_b_"))
 async def adm_brand_stock(call: types.CallbackQuery):
     if call.from_user.id != ADMIN:
-        return await call.answer("⛔️ Нет доступа.", show_alert=True)
+        return await call.answer("\u26d4\ufe0f Нет доступа.", show_alert=True)
     brand_idx = call.data.split("_")[2]
     brand_name = idx_to_brand(brand_idx)
     await call.message.edit_text(
-        f"⚙️ <b>Склад — {brand_name}</b>\n\nУправляй остатками:",
+        f"\u2699\ufe0f <b>Склад — {brand_name}</b>\n\nУправляй остатками:",
         reply_markup=get_admin_stock_keyboard(brand_idx)
     )
 
@@ -487,7 +487,7 @@ async def noop_handler(call: types.CallbackQuery):
 @dp.callback_query(F.data.startswith("adm_"))
 async def adm_stock_action(call: types.CallbackQuery):
     if call.from_user.id != ADMIN:
-        return await call.answer("⛔️ Нет доступа.", show_alert=True)
+        return await call.answer("\u26d4\ufe0f Нет доступа.", show_alert=True)
 
     parts = call.data.split("_")
     action = parts[1]
@@ -515,7 +515,7 @@ async def adm_stock_action(call: types.CallbackQuery):
         return await call.answer("Неизвестное действие")
 
     set_stock(brand_name, flavor, new_qty)
-    status = f"✅ {new_qty} шт." if new_qty > 0 else "❌ Sold Out"
+    status = f"\u2705 {new_qty} шт." if new_qty > 0 else "\u274c Sold Out"
     await call.answer(f"{flavor}: {status}")
     await call.message.edit_reply_markup(reply_markup=get_admin_stock_keyboard(brand_idx))
 
@@ -540,12 +540,12 @@ async def flavors_callback(call: types.CallbackQuery):
                 ))
             else:
                 keyboard.row(types.InlineKeyboardButton(
-                    text=f"❌ {flavor} — Sold Out",
+                    text=f"\u274c {flavor} — Sold Out",
                     callback_data="soldout"
                 ))
 
-    keyboard.row(types.InlineKeyboardButton(text="⬅️ Назад к каталогу", callback_data="back_to_cats"))
-    caption = f"🍒 <b>Вкусы {brand_name}:</b>\nВыбирай свой вариант:"
+    keyboard.row(types.InlineKeyboardButton(text="\u2b05\ufe0f Назад к каталогу", callback_data="back_to_cats"))
+    caption = f"\U0001f352 <b>Вкусы {brand_name}:</b>\nВыбирай свой вариант:"
 
     if brand_data and brand_data["photo"]:
         await call.message.delete()
@@ -556,7 +556,7 @@ async def flavors_callback(call: types.CallbackQuery):
 
 @dp.callback_query(F.data == "soldout")
 async def soldout_handler(call: types.CallbackQuery):
-    await call.answer("😔 Этого вкуса нет в наличии. Выбери другой!", show_alert=True)
+    await call.answer("\U0001f614 Этого вкуса нет в наличии. Выбери другой!", show_alert=True)
 
 
 @dp.callback_query(F.data.startswith("sl_"))
@@ -572,7 +572,7 @@ async def delivery_callback(call: types.CallbackQuery):
         return await call.answer("Ошибка: вкус не найден")
 
     if get_stock(brand_name, flavor) <= 0:
-        await call.answer("😔 Только что разобрали! Выбери другой вкус.", show_alert=True)
+        await call.answer("\U0001f614 Только что разобрали! Выбери другой вкус.", show_alert=True)
         return
 
     price_int = int(price)
@@ -580,28 +580,28 @@ async def delivery_callback(call: types.CallbackQuery):
 
     keyboard = InlineKeyboardBuilder()
     keyboard.row(types.InlineKeyboardButton(
-        text="📦 InPost (+14zł)", callback_data=f"pay_i_{brand_idx}_{flavor_idx}_{price_int + 14}_0"
+        text="\U0001f4e6 InPost (+14z\u0142)", callback_data=f"pay_i_{brand_idx}_{flavor_idx}_{price_int + 14}_0"
     ))
     keyboard.row(types.InlineKeyboardButton(
-        text="🤝 Inpost GRATIS (От 5 штук)", callback_data=f"pay_g_{brand_idx}_{flavor_idx}_{price_int}_0"
+        text="\U0001f91d Inpost GRATIS (\u041e\u0442 5 \u0448\u0442\u0443\u043a)", callback_data=f"pay_g_{brand_idx}_{flavor_idx}_{price_int}_0"
     ))
 
     if balance > 0:
         use_bonus = min(balance, price_int)
         keyboard.row(types.InlineKeyboardButton(
-            text=f"🎁 InPost со скидкой -{use_bonus}zł (баланс: {balance}zł)",
+            text=f"\U0001f381 InPost со скидкой -{use_bonus}zł (баланс: {balance}zł)",
             callback_data=f"pay_i_{brand_idx}_{flavor_idx}_{price_int + 14}_{use_bonus}"
         ))
         keyboard.row(types.InlineKeyboardButton(
-            text=f"🎁 GRATIS со скидкой -{use_bonus}zł (баланс: {balance}zł)",
+            text=f"\U0001f381 GRATIS со скидкой -{use_bonus}zł (баланс: {balance}zł)",
             callback_data=f"pay_g_{brand_idx}_{flavor_idx}_{price_int}_{use_bonus}"
         ))
 
-    keyboard.row(types.InlineKeyboardButton(text="⬅️ Назад к вкусам", callback_data=f"brn_{brand_idx}"))
+    keyboard.row(types.InlineKeyboardButton(text="\u2b05\ufe0f Назад к вкусам", callback_data=f"brn_{brand_idx}"))
 
-    text = f"📍 <b>Оформление:</b> {brand_name} — {flavor}\n\nВыбери способ получения:"
+    text = f"\U0001f4cd <b>Оформление:</b> {brand_name} — {flavor}\n\nВыбери способ получения:"
     if balance > 0:
-        text += f"\n\n💰 У тебя есть <b>{balance}zł</b> бонусов — можешь применить при выборе!"
+        text += f"\n\n\U0001f4b0 У тебя есть <b>{balance}zł</b> бонусов — можешь применить при выборе!"
 
     await call.message.delete()
     await call.bot.send_message(call.from_user.id, text, reply_markup=keyboard.as_markup())
@@ -625,25 +625,25 @@ async def payment_callback(call: types.CallbackQuery):
     final_total = max(0, int(total) - bonus_int)
 
     pay_text = (
-        f"💳 <b>Оплата заказа</b>\n\n"
+        f"\U0001f4b3 <b>Оплата заказа</b>\n\n"
         f"Товар: {brand_name} ({flavor})\n"
         f"Способ: {delivery_type}\n"
     )
     if bonus_int > 0:
-        pay_text += f"🎁 Бонусная скидка: -{bonus_int}zł\n"
+        pay_text += f"\U0001f381 Бонусная скидка: -{bonus_int}zł\n"
     pay_text += (
         f"<b>Сумма к оплате: {final_total}zł</b>\n\n"
         f"Переведи ровную сумму по BLIK на номер:\n<code>{PHONE_NUMBER}</code>\n\n"
-        "📸 После оплаты пришли <b>скриншот чека</b> следующим сообщением.\n"
+        "\U0001f4f8 После оплаты пришли <b>скриншот чека</b> следующим сообщением.\n"
         "Или нажми кнопку ниже если не можешь отправить фото."
     )
 
     keyboard = InlineKeyboardBuilder()
     keyboard.row(types.InlineKeyboardButton(
-        text="✅ Оплатил(а), фото нет",
+        text="\u2705 Оплатил(а), фото нет",
         callback_data=f"fin_{delivery_code}_{brand_idx}_{flavor_idx}_{final_total}_{bonus_int}"
     ))
-    keyboard.row(types.InlineKeyboardButton(text="❌ Отменить", callback_data="back_to_cats"))
+    keyboard.row(types.InlineKeyboardButton(text="\u274c Отменить", callback_data="back_to_cats"))
 
     PAYMENT_PENDING[call.from_user.id] = {
         "delivery_code": delivery_code, "brand_idx": brand_idx,
@@ -679,11 +679,11 @@ async def finish_callback(call: types.CallbackQuery):
 def _build_admin_order_kb(order_id, user_id):
     kb = InlineKeyboardBuilder()
     kb.row(
-        types.InlineKeyboardButton(text="✅ Оплата пришла", callback_data=f"confirm_{order_id}_{user_id}"),
-        types.InlineKeyboardButton(text="❌ Не пришла", callback_data=f"reject_{order_id}_{user_id}")
+        types.InlineKeyboardButton(text="\u2705 Оплата пришла", callback_data=f"confirm_{order_id}_{user_id}"),
+        types.InlineKeyboardButton(text="\u274c Не пришла", callback_data=f"reject_{order_id}_{user_id}")
     )
-    kb.row(types.InlineKeyboardButton(text="🚚 Отправить трек", callback_data=f"track_{order_id}_{user_id}"))
-    kb.row(types.InlineKeyboardButton(text="📦 Доставлено", callback_data=f"delivered_{order_id}_{user_id}"))
+    kb.row(types.InlineKeyboardButton(text="\U0001f69a Отправить трек", callback_data=f"track_{order_id}_{user_id}"))
+    kb.row(types.InlineKeyboardButton(text="\U0001f4e6 Доставлено", callback_data=f"delivered_{order_id}_{user_id}"))
     return kb.as_markup()
 
 
@@ -706,7 +706,7 @@ async def _create_order(bot, user_id, username, brand_name, flavor, total, deliv
     if delivery == "InPost":
         set_collect(user_id, {"step": "name", "order_id": order_id,
                                "name": "", "phone": "", "email": "", "paczkomat": ""})
-        text = "📝 <b>Данные для InPost</b>\n\nШаг 1/4 — Напиши своё <b>полное имя и фамилию</b>:"
+        text = "\U0001f4dd <b>Данные для InPost</b>\n\nШаг 1/4 — Напиши своё <b>полное имя и фамилию</b>:"
         if is_callback:
             await message.edit_text(text)
         else:
@@ -714,23 +714,23 @@ async def _create_order(bot, user_id, username, brand_name, flavor, total, deliv
     else:
         if ADMIN:
             admin_text = (
-                f"⚡️ <b>НОВЫЙ ЗАКАЗ (GRATIS)</b>\n"
-                f"👤 @{username} (<code>{user_id}</code>)\n"
-                f"📦 {brand_name} — {flavor}\n"
-                f"💵 Сумма: <b>{total}zł</b>"
+                f"\u26a1\ufe0f <b>НОВЫЙ ЗАКАЗ (GRATIS)</b>\n"
+                f"\U0001f464 @{username} (<code>{user_id}</code>)\n"
+                f"\U0001f4e6 {brand_name} — {flavor}\n"
+                f"\U0001f4b5 Сумма: <b>{total}zł</b>"
             )
             if bonus_used > 0:
                 admin_text += f" (скидка -{bonus_used}zł)"
-            admin_text += f"\n🚚 Доставка: {delivery}\n🆔 Заказ №{order_id}"
+            admin_text += f"\n\U0001f69a Доставка: {delivery}\n\U0001f194 Заказ №{order_id}"
             if not photo_id:
-                admin_text += "\n📸 Скриншот: не прислан"
+                admin_text += "\n\U0001f4f8 Скриншот: не прислан"
 
             if photo_id:
                 await bot.send_photo(ADMIN, photo_id, caption=admin_text, reply_markup=_build_admin_order_kb(order_id, user_id))
             else:
                 await bot.send_message(ADMIN, admin_text, reply_markup=_build_admin_order_kb(order_id, user_id))
 
-        reply_text = "🚀 <b>Заказ принят!</b> Менеджер свяжется с тобой для передачи товара."
+        reply_text = "\U0001f680 <b>Заказ принят!</b> Менеджер свяжется с тобой для передачи товара."
         if is_callback:
             await message.edit_text(reply_text)
         else:
@@ -744,7 +744,7 @@ async def back_to_cats(call: types.CallbackQuery):
         idx = brand_to_idx(brand)
         keyboard.row(types.InlineKeyboardButton(text=brand, callback_data=f"brn_{idx}"))
     await call.message.delete()
-    await call.bot.send_message(call.from_user.id, "✨ <b>Каталог продукции</b>\nВыбери бренд:", reply_markup=keyboard.as_markup())
+    await call.bot.send_message(call.from_user.id, "\u2728 <b>Каталог продукции</b>\nВыбери бренд:", reply_markup=keyboard.as_markup())
 
 
 # --- ЧАСТЬ 9: ОБРАБОТКА ТЕКСТА И ФОТО ---
@@ -764,7 +764,7 @@ async def photo_handler(message: types.Message):
         except (IndexError, ValueError):
             return await message.answer("Ошибка: вкус не найден")
 
-        await message.answer("✅ Скриншот получен! Сейчас заполним данные для доставки.")
+        await message.answer("\u2705 Скриншот получен! Сейчас заполним данные для доставки.")
         await _create_order(
             bot=bot, user_id=message.from_user.id,
             username=message.from_user.username or "без ника",
@@ -787,11 +787,11 @@ async def text_handler(message: types.Message):
         sent, failed = 0, 0
         for uid in all_users:
             try:
-                await bot.send_message(uid, f"📢 <b>Сообщение от Cloude Atmosphere:</b>\n\n{message.text}")
+                await bot.send_message(uid, f"\U0001f4e2 <b>Сообщение от Cloude Atmosphere:</b>\n\n{message.text}")
                 sent += 1
             except Exception:
                 failed += 1
-        await message.answer(f"✅ Рассылка завершена!\nОтправлено: {sent}\nОшибок: {failed}")
+        await message.answer(f"\u2705 Рассылка завершена!\nОтправлено: {sent}\nОшибок: {failed}")
         return
 
     # Трек-номер от админа
@@ -803,13 +803,13 @@ async def text_handler(message: types.Message):
         cur.execute("UPDATE orders SET track_number = %s, status = 'В пути' WHERE order_id = %s", (track, order_id))
         conn.commit()
         conn.close()
-        await message.answer(f"✅ Трек-номер <code>{track}</code> сохранён для заказа №{order_id}.")
+        await message.answer(f"\u2705 Трек-номер <code>{track}</code> сохранён для заказа №{order_id}.")
         try:
             await bot.send_message(buyer_id,
-                f"📦 <b>Твой заказ отправлен!</b>\n\nТрек-номер: <code>{track}</code>\n"
-                "Отследить посылку можно на сайте InPost. 🚀")
+                f"\U0001f4e6 <b>Твой заказ отправлен!</b>\n\nТрек-номер: <code>{track}</code>\n"
+                "Отследить посылку можно на сайте InPost. \U0001f680")
         except Exception:
-            await message.answer("⚠️ Не удалось уведомить пользователя.")
+            await message.answer("\u26a0\ufe0f Не удалось уведомить пользователя.")
         return
 
     # Текстовый комментарий к отзыву
@@ -818,7 +818,7 @@ async def text_handler(message: types.Message):
         await _save_review(user_id=user_id, username=pending["username"],
                            order_id=pending["order_id"], item_name=pending["item_name"],
                            flavor=pending["flavor"], rating=pending["rating"], text=message.text.strip())
-        await message.answer("💬 Спасибо за отзыв! Твоё мнение очень важно для нас ☁️",
+        await message.answer("\U0001f4ac Спасибо за отзыв! Твоё мнение очень важно для нас \u2601\ufe0f",
                              reply_markup=get_main_keyboard())
         return
 
@@ -831,19 +831,19 @@ async def text_handler(message: types.Message):
             collect["name"] = message.text.strip()
             collect["step"] = "phone"
             set_collect(user_id, collect)
-            await message.answer("📞 Шаг 2/4 — Напиши свой <b>номер телефона</b>:")
+            await message.answer("\U0001f4de Шаг 2/4 — Напиши свой <b>номер телефона</b>:")
 
         elif step == "phone":
             collect["phone"] = message.text.strip()
             collect["step"] = "email"
             set_collect(user_id, collect)
-            await message.answer("📧 Шаг 3/4 — Напиши свой <b>email</b>:")
+            await message.answer("\U0001f4e7 Шаг 3/4 — Напиши свой <b>email</b>:")
 
         elif step == "email":
             collect["email"] = message.text.strip()
             collect["step"] = "paczkomat"
             set_collect(user_id, collect)
-            await message.answer("📦 Шаг 4/4 — Напиши <b>код пачкомата</b> (напр. KRA01M):")
+            await message.answer("\U0001f4e6 Шаг 4/4 — Напиши <b>код пачкомата</b> (напр. KRA01M):")
 
         elif step == "paczkomat":
             collect["paczkomat"] = message.text.strip()
@@ -867,24 +867,24 @@ async def text_handler(message: types.Message):
             conn.close()
 
             await message.answer(
-                "✅ <b>Все данные получены!</b>\n"
-                "Менеджер проверит оплату и отправит твой заказ. Спасибо, что выбрал Cloude! ☁️"
+                "\u2705 <b>Все данные получены!</b>\n"
+                "Менеджер проверит оплату и отправит твой заказ. Спасибо, что выбрал Cloude! \u2601\ufe0f"
             )
 
             if ADMIN and row:
                 item, flavor, total, saved_photo = row
                 username = message.from_user.username or "без ника"
                 admin_text = (
-                    f"💰 <b>НОВЫЙ ЗАКАЗ (InPost)</b>\n"
-                    f"👤 @{username} (<code>{user_id}</code>)\n"
-                    f"📦 {item} — {flavor}\n"
-                    f"💵 Сумма: <b>{total}zł</b>\n"
-                    f"🚚 Доставка: InPost\n\n"
-                    f"📋 <b>Данные доставки:</b>\n{info_text}\n\n"
-                    f"🆔 Заказ №{order_id}"
+                    f"\U0001f4b0 <b>НОВЫЙ ЗАКАЗ (InPost)</b>\n"
+                    f"\U0001f464 @{username} (<code>{user_id}</code>)\n"
+                    f"\U0001f4e6 {item} — {flavor}\n"
+                    f"\U0001f4b5 Сумма: <b>{total}zł</b>\n"
+                    f"\U0001f69a Доставка: InPost\n\n"
+                    f"\U0001f4cb <b>Данные доставки:</b>\n{info_text}\n\n"
+                    f"\U0001f194 Заказ №{order_id}"
                 )
                 if not saved_photo:
-                    admin_text += "\n📸 Скриншот: не прислан"
+                    admin_text += "\n\U0001f4f8 Скриншот: не прислан"
                 if saved_photo:
                     await bot.send_photo(ADMIN, saved_photo, caption=admin_text,
                                          reply_markup=_build_admin_order_kb(order_id, user_id))
@@ -901,7 +901,7 @@ async def text_handler(message: types.Message):
 @dp.callback_query(F.data.startswith("confirm_"))
 async def confirm_order(call: types.CallbackQuery):
     if call.from_user.id != ADMIN:
-        return await call.answer("⛔️ Нет доступа.", show_alert=True)
+        return await call.answer("\u26d4\ufe0f Нет доступа.", show_alert=True)
     parts = call.data.split("_")
     order_id, user_id = int(parts[1]), int(parts[2])
 
@@ -923,17 +923,17 @@ async def confirm_order(call: types.CallbackQuery):
     new_qty = decrement_stock(item_name, flavor)
     if new_qty <= LOW_STOCK_THRESHOLD:
         await bot.send_message(ADMIN,
-            f"⚠️ <b>Товар заканчивается!</b>\n📦 {item_name} — {flavor}\nОстаток: <b>{new_qty} шт.</b>")
+            f"\u26a0\ufe0f <b>Товар заканчивается!</b>\n\U0001f4e6 {item_name} — {flavor}\nОстаток: <b>{new_qty} шт.</b>")
 
-    await call.message.edit_text(call.message.text + "\n\n✅ <b>Подтверждено!</b> Склад обновлён.")
+    await call.message.edit_text(call.message.text + "\n\n\u2705 <b>Подтверждено!</b> Склад обновлён.")
     await bot.send_message(user_id,
-        "✅ <b>Оплата подтверждена!</b>\nТвой заказ принят в обработку. Скоро получишь трек-номер. 🚀")
+        "\u2705 <b>Оплата подтверждена!</b>\nТвой заказ принят в обработку. Скоро получишь трек-номер. \U0001f680")
 
 
 @dp.callback_query(F.data.startswith("reject_"))
 async def reject_order(call: types.CallbackQuery):
     if call.from_user.id != ADMIN:
-        return await call.answer("⛔️ Нет доступа.", show_alert=True)
+        return await call.answer("\u26d4\ufe0f Нет доступа.", show_alert=True)
     parts = call.data.split("_")
     order_id, user_id = int(parts[1]), int(parts[2])
 
@@ -951,15 +951,15 @@ async def reject_order(call: types.CallbackQuery):
     conn.commit()
     conn.close()
 
-    await call.message.edit_text(call.message.text + "\n\n❌ <b>Отклонено.</b>")
+    await call.message.edit_text(call.message.text + "\n\n\u274c <b>Отклонено.</b>")
     await bot.send_message(user_id,
-        "❌ <b>Оплата не найдена.</b>\nПроверь перевод. Вопросы — в поддержку 🤝")
+        "\u274c <b>Оплата не найдена.</b>\nПроверь перевод. Вопросы — в поддержку \U0001f91d")
 
 
 @dp.callback_query(F.data.startswith("track_"))
 async def send_track_number(call: types.CallbackQuery):
     if call.from_user.id != ADMIN:
-        return await call.answer("⛔️ Нет доступа.", show_alert=True)
+        return await call.answer("\u26d4\ufe0f Нет доступа.", show_alert=True)
     parts = call.data.split("_")
     order_id, user_id = int(parts[1]), int(parts[2])
     TRACK_PENDING[call.from_user.id] = (order_id, user_id)
@@ -971,7 +971,7 @@ async def send_track_number(call: types.CallbackQuery):
 @dp.callback_query(F.data.startswith("delivered_"))
 async def order_delivered(call: types.CallbackQuery):
     if call.from_user.id != ADMIN:
-        return await call.answer("⛔️ Нет доступа.", show_alert=True)
+        return await call.answer("\u26d4\ufe0f Нет доступа.", show_alert=True)
     parts = call.data.split("_")
     order_id, user_id = int(parts[1]), int(parts[2])
 
@@ -990,21 +990,21 @@ async def order_delivered(call: types.CallbackQuery):
     conn.commit()
     conn.close()
 
-    await call.message.edit_text(call.message.text + "\n\n📦 <b>Доставлено!</b> Запрос отзыва отправлен клиенту.")
+    await call.message.edit_text(call.message.text + "\n\n\U0001f4e6 <b>Доставлено!</b> Запрос отзыва отправлен клиенту.")
 
     kb = InlineKeyboardBuilder()
-    for i, s in enumerate(["⭐", "⭐⭐", "⭐⭐⭐", "⭐⭐⭐⭐", "⭐⭐⭐⭐⭐"], 1):
+    for i, s in enumerate(["\u2b50", "\u2b50\u2b50", "\u2b50\u2b50\u2b50", "\u2b50\u2b50\u2b50\u2b50", "\u2b50\u2b50\u2b50\u2b50\u2b50"], 1):
         kb.button(text=s, callback_data=f"revrate_{i}_{order_id}")
     kb.adjust(5)
-    kb.row(types.InlineKeyboardButton(text="🙅 Пропустить", callback_data=f"revskip_{order_id}"))
+    kb.row(types.InlineKeyboardButton(text="\U0001f645 Пропустить", callback_data=f"revskip_{order_id}"))
 
     try:
         await bot.send_message(user_id,
-            f"☁️ <b>Как тебе заказ?</b>\n\n📦 {item_name} — {flavor}\n\n"
+            f"\u2601\ufe0f <b>Как тебе заказ?</b>\n\n\U0001f4e6 {item_name} — {flavor}\n\n"
             f"Оцени покупку — это займёт 10 секунд!",
             reply_markup=kb.as_markup())
     except Exception:
-        await call.answer("⚠️ Не удалось отправить запрос отзыва.", show_alert=True)
+        await call.answer("\u26a0\ufe0f Не удалось отправить запрос отзыва.", show_alert=True)
 
 
 @dp.callback_query(F.data.startswith("revrate_"))
@@ -1029,10 +1029,11 @@ async def review_rating(call: types.CallbackQuery):
     }
 
     kb = InlineKeyboardBuilder()
-    kb.row(types.InlineKeyboardButton(text="➡️ Пропустить комментарий",
+    kb.row(types.InlineKeyboardButton(text="\u27a1\ufe0f Пропустить комментарий",
                                        callback_data=f"revnotext_{order_id}_{rating}"))
+    stars = "\u2b50" * rating
     await call.message.edit_text(
-        f"Ты поставил {"⭐" * rating}\n\n💬 Хочешь добавить комментарий? Напиши его.\n"
+        f"Ты поставил {stars}\n\n\U0001f4ac Хочешь добавить комментарий? Напиши его.\n"
         "Или нажми кнопку, чтобы пропустить.",
         reply_markup=kb.as_markup()
     )
@@ -1054,12 +1055,12 @@ async def review_no_text(call: types.CallbackQuery):
     username = call.from_user.username or call.from_user.first_name or "Покупатель"
     await _save_review(user_id=call.from_user.id, username=username, order_id=order_id,
                        item_name=item_name, flavor=flavor, rating=rating, text=None)
-    await call.message.edit_text("💬 Спасибо за оценку! Это помогает нам становиться лучше ☁️")
+    await call.message.edit_text("\U0001f4ac Спасибо за оценку! Это помогает нам становиться лучше \u2601\ufe0f")
 
 
 @dp.callback_query(F.data.startswith("revskip_"))
 async def review_skip(call: types.CallbackQuery):
-    await call.message.edit_text("Хорошо! Если захочешь — оставь отзыв через ⭐️ Отзывы 😊")
+    await call.message.edit_text("Хорошо! Если захочешь — оставь отзыв через \u2b50\ufe0f Отзывы \U0001f60a")
 
 
 async def _save_review(user_id, username, order_id, item_name, flavor, rating, text):
@@ -1077,29 +1078,29 @@ async def _save_review(user_id, username, order_id, item_name, flavor, rating, t
     if not ADMIN:
         return
 
-    stars = "⭐" * rating
+    stars = "\u2b50" * rating
     admin_text = (
-        f"💬 <b>Новый отзыв!</b>\n\n"
-        f"👤 @{username} (<code>{user_id}</code>)\n"
-        f"📦 {item_name} — {flavor}\n"
+        f"\U0001f4ac <b>Новый отзыв!</b>\n\n"
+        f"\U0001f464 @{username} (<code>{user_id}</code>)\n"
+        f"\U0001f4e6 {item_name} — {flavor}\n"
         f"Оценка: {stars} ({rating}/5)\n"
     )
-    admin_text += f"\n💬 <i>«{text}»</i>" if text else "\n💬 <i>Без комментария</i>"
-    admin_text += f"\n\n🆔 Отзыв №{review_id} | Заказ №{order_id}"
+    admin_text += f"\n\U0001f4ac <i>«{text}»</i>" if text else "\n\U0001f4ac <i>Без комментария</i>"
+    admin_text += f"\n\n\U0001f194 Отзыв №{review_id} | Заказ №{order_id}"
 
     kb = InlineKeyboardBuilder()
     if REVIEWS_CHANNEL_ID:
-        kb.row(types.InlineKeyboardButton(text="📢 Опубликовать в канал", callback_data=f"revpub_{review_id}"))
-    kb.row(types.InlineKeyboardButton(text="🗑 Не публиковать", callback_data=f"revdel_{review_id}"))
+        kb.row(types.InlineKeyboardButton(text="\U0001f4e2 Опубликовать в канал", callback_data=f"revpub_{review_id}"))
+    kb.row(types.InlineKeyboardButton(text="\U0001f5d1 Не публиковать", callback_data=f"revdel_{review_id}"))
     await bot.send_message(ADMIN, admin_text, reply_markup=kb.as_markup())
 
 
 @dp.callback_query(F.data.startswith("revpub_"))
 async def review_publish(call: types.CallbackQuery):
     if call.from_user.id != ADMIN:
-        return await call.answer("⛔️ Нет доступа.", show_alert=True)
+        return await call.answer("\u26d4\ufe0f Нет доступа.", show_alert=True)
     if not REVIEWS_CHANNEL_ID:
-        return await call.answer("⚠️ REVIEWS_CHANNEL_ID не задан!", show_alert=True)
+        return await call.answer("\u26a0\ufe0f REVIEWS_CHANNEL_ID не задан!", show_alert=True)
 
     review_id = int(call.data.split("_")[1])
     conn = get_conn()
@@ -1111,18 +1112,19 @@ async def review_publish(call: types.CallbackQuery):
         return await call.answer("Отзыв не найден", show_alert=True)
 
     username, item_name, flavor, rating, text = row
+    stars = "\u2b50" * rating
     channel_text = (
-        f"☁️ <b>Отзыв покупателя</b>\n\n"
-        f"📦 <b>{item_name}</b> — {flavor}\n"
-        f"Оценка: {"⭐" * rating}\n"
+        f"\u2601\ufe0f <b>Отзыв покупателя</b>\n\n"
+        f"\U0001f4e6 <b>{item_name}</b> — {flavor}\n"
+        f"Оценка: {stars}\n"
     )
     if text:
-        channel_text += f"\n💬 <i>«{text}»</i>\n"
-    channel_text += f"\n👤 @{username}"
+        channel_text += f"\n\U0001f4ac <i>«{text}»</i>\n"
+    channel_text += f"\n\U0001f464 @{username}"
 
     try:
         await bot.send_message(REVIEWS_CHANNEL_ID, channel_text)
-        await call.message.edit_text(call.message.text + "\n\n✅ <b>Опубликовано в канал!</b>")
+        await call.message.edit_text(call.message.text + "\n\n\u2705 <b>Опубликовано в канал!</b>")
     except Exception as e:
         await call.answer(f"Ошибка: {e}", show_alert=True)
 
@@ -1130,8 +1132,8 @@ async def review_publish(call: types.CallbackQuery):
 @dp.callback_query(F.data.startswith("revdel_"))
 async def review_delete(call: types.CallbackQuery):
     if call.from_user.id != ADMIN:
-        return await call.answer("⛔️ Нет доступа.", show_alert=True)
-    await call.message.edit_text(call.message.text + "\n\n🗑 <b>Не опубликован.</b>")
+        return await call.answer("\u26d4\ufe0f Нет доступа.", show_alert=True)
+    await call.message.edit_text(call.message.text + "\n\n\U0001f5d1 <b>Не опубликован.</b>")
 
 
 # --- ЗАПУСК ---
