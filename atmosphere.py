@@ -32,6 +32,14 @@ TOKEN = os.getenv('BOT_TOKEN')
 ADMIN_ID_ENV = os.getenv('ADMIN_ID')
 ADMIN = int(ADMIN_ID_ENV) if ADMIN_ID_ENV else None
 
+ADMIN2_ID_ENV = os.getenv('ADMIN2_ID')
+ADMIN2 = int(ADMIN2_ID_ENV) if ADMIN2_ID_ENV else None
+
+ADMINS = [a for a in [ADMIN, ADMIN2] if a is not None]
+
+def is_admin(user_id: int) -> bool:
+    return user_id in ADMINS
+
 REVIEWS_CHANNEL_ID_ENV = os.getenv('REVIEWS_CHANNEL_ID')
 REVIEWS_CHANNEL_ID = int(REVIEWS_CHANNEL_ID_ENV) if REVIEWS_CHANNEL_ID_ENV else None
 
@@ -253,12 +261,12 @@ def init_db():
 # --- ЧАСТЬ 4: АССОРТИМЕНТ ТОВАРОВ ---
 STOCKS = {
     "VOZOL Salt": {
-        "flavors": ["Strawberry Watermelon", "Kiwi Guava", "White Peach", "Berries"],
+        "flavors": ["Strawberry Watermelon", "Kiwi Passion Fruit Guava", "Berry", "Berry Peach"],
         "photo": "AgACAgIAAxkBAAICbmnlTR8eWQcAATCwLgAB4Qpan_dwJF4AAiIZaxugqSlLvokeaQm4iO8BAAMCAAN3AAM7BA",
         "price": 45
     },
     "ELFLIQ Salt": {
-        "flavors": ["Grape Cherry", "Blueberry Sour Raspberry", "Blueberry Lemon", "Watermelon", "Pina Colada"],
+        "flavors": ["Blackberry Lemon", "Blueberry Sour Raspberry", "Blueberry Lemon", "Watermelon", "Pina Colada"],
         "photo": "AgACAgIAAxkBAAICfGnlUOyZ0JA7KfcuGPo4vncBgBhpAAIqGWsboKkpS0545fr-HtvFAQADAgADeAADOwQ",
         "price": 45
     }
@@ -458,19 +466,19 @@ def get_admin_brands_keyboard():
 
 @dp.message(Command("admin"))
 async def admin_panel(message: types.Message):
-    if message.from_user.id != ADMIN:
+    if not is_admin(message.from_user.id):
         return await message.answer("\u26d4\ufe0f Нет доступа.")
     await message.answer("\u2699\ufe0f <b>Админ-панель</b>\n\nВыбери раздел:", reply_markup=get_admin_brands_keyboard())
 
 @dp.callback_query(F.data == "adm_brands")
 async def adm_brands(call: types.CallbackQuery):
-    if call.from_user.id != ADMIN:
+    if not is_admin(call.from_user.id):
         return await call.answer("\u26d4\ufe0f Нет доступа.", show_alert=True)
     await call.message.edit_text("\u2699\ufe0f <b>Админ-панель</b>\n\nВыбери раздел:", reply_markup=get_admin_brands_keyboard())
 
 @dp.callback_query(F.data == "adm_broadcast")
 async def adm_broadcast_start(call: types.CallbackQuery):
-    if call.from_user.id != ADMIN:
+    if not is_admin(call.from_user.id):
         return await call.answer("\u26d4\ufe0f Нет доступа.", show_alert=True)
     BROADCAST_PENDING.add(call.from_user.id)
     await call.message.edit_text(
@@ -481,7 +489,7 @@ async def adm_broadcast_start(call: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("adm_b_"))
 async def adm_brand_stock(call: types.CallbackQuery):
-    if call.from_user.id != ADMIN:
+    if not is_admin(call.from_user.id):
         return await call.answer("\u26d4\ufe0f Нет доступа.", show_alert=True)
     brand_idx = call.data.split("_")[2]
     brand_name = idx_to_brand(brand_idx)
@@ -496,7 +504,7 @@ async def noop_handler(call: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("adm_"))
 async def adm_stock_action(call: types.CallbackQuery):
-    if call.from_user.id != ADMIN:
+    if not is_admin(call.from_user.id):
         return await call.answer("\u26d4\ufe0f Нет доступа.", show_alert=True)
 
     parts = call.data.split("_")
@@ -643,7 +651,7 @@ async def payment_callback(call: types.CallbackQuery):
         pay_text += f"\U0001f381 Бонусная скидка: -{bonus_int}zł\n"
     pay_text += (
         f"<b>Сумма к оплате: {final_total}zł</b>\n\n"
-        f"Переведи ровную сумму по BLIK на номер:\n<code>{PHONE_NUMBER}</code>\n\n"
+        f"Переведи ровную сумму по BLIK на номер:\n<code>{"+48536169149"}</code>\n\n"
         "\U0001f4f8 После оплаты пришли <b>скриншот чека</b> следующим сообщением.\n"
         "Или нажми кнопку ниже если не можешь отправить фото."
     )
@@ -722,7 +730,17 @@ async def _create_order(bot, user_id, username, brand_name, flavor, total, deliv
         else:
             await bot.send_message(user_id, text)
     else:
-        if ADMIN:
+        # GRATIS: списываем склад сразу при создании заказа
+        new_qty = decrement_stock(brand_name, flavor)
+        if new_qty <= LOW_STOCK_THRESHOLD:
+            for adm in ADMINS:
+                try:
+                    await bot.send_message(adm,
+                        f"\u26a0\ufe0f <b>Товар заканчивается!</b>\n\U0001f4e6 {brand_name} — {flavor}\nОстаток: <b>{new_qty} шт.</b>")
+                except Exception:
+                    pass
+
+        if ADMINS:
             admin_text = (
                 f"\u26a1\ufe0f <b>НОВЫЙ ЗАКАЗ (GRATIS)</b>\n"
                 f"\U0001f464 @{username} (<code>{user_id}</code>)\n"
@@ -735,10 +753,15 @@ async def _create_order(bot, user_id, username, brand_name, flavor, total, deliv
             if not photo_id:
                 admin_text += "\n\U0001f4f8 Скриншот: не прислан"
 
-            if photo_id:
-                await bot.send_photo(ADMIN, photo_id, caption=admin_text, reply_markup=_build_admin_order_kb(order_id, user_id))
-            else:
-                await bot.send_message(ADMIN, admin_text, reply_markup=_build_admin_order_kb(order_id, user_id))
+            for adm in ADMINS:
+                try:
+                    if photo_id:
+                        await bot.send_photo(adm, photo_id, caption=admin_text, reply_markup=_build_admin_order_kb(order_id, user_id))
+                    else:
+                        await bot.send_message(adm, admin_text, reply_markup=_build_admin_order_kb(order_id, user_id))
+                except Exception:
+                    pass
+
 
         reply_text = "\U0001f680 <b>Заказ принят!</b> Менеджер свяжется с тобой для передачи товара."
         if is_callback:
@@ -761,7 +784,7 @@ async def back_to_cats(call: types.CallbackQuery):
 
 @dp.message(F.photo)
 async def photo_handler(message: types.Message):
-    if ADMIN and message.from_user.id == ADMIN and message.from_user.id not in PAYMENT_PENDING:
+    if ADMIN and is_admin(message.from_user.id) and message.from_user.id not in PAYMENT_PENDING:
         await message.answer(f"ID фото для кода:\n<code>{message.photo[-1].file_id}</code>")
         return
 
@@ -791,7 +814,7 @@ async def text_handler(message: types.Message):
     user_id = message.from_user.id
 
     # Рассылка от админа
-    if user_id == ADMIN and user_id in BROADCAST_PENDING:
+    if is_admin(user_id) and user_id in BROADCAST_PENDING:
         BROADCAST_PENDING.discard(user_id)
         all_users = get_all_user_ids()
         sent, failed = 0, 0
@@ -805,7 +828,7 @@ async def text_handler(message: types.Message):
         return
 
     # Трек-номер от админа
-    if user_id == ADMIN and user_id in TRACK_PENDING:
+    if is_admin(user_id) and user_id in TRACK_PENDING:
         order_id, buyer_id = TRACK_PENDING.pop(user_id)
         track = message.text.strip()
         conn = get_conn()
@@ -902,7 +925,7 @@ async def text_handler(message: types.Message):
                 "Менеджер проверит оплату и отправит твой заказ. Спасибо, что выбрал Cloude! \u2601\ufe0f"
             )
 
-            if ADMIN and row:
+            if ADMINS and row:
                 item, flavor, total, saved_photo = row
                 username = message.from_user.username or "без ника"
                 admin_text = (
@@ -916,12 +939,16 @@ async def text_handler(message: types.Message):
                 )
                 if not saved_photo:
                     admin_text += "\n\U0001f4f8 Скриншот: не прислан"
-                if saved_photo:
-                    await bot.send_photo(ADMIN, saved_photo, caption=admin_text,
-                                         reply_markup=_build_admin_order_kb(order_id, user_id))
-                else:
-                    await bot.send_message(ADMIN, admin_text,
-                                           reply_markup=_build_admin_order_kb(order_id, user_id))
+                for adm in ADMINS:
+                    try:
+                        if saved_photo:
+                            await bot.send_photo(adm, saved_photo, caption=admin_text,
+                                                 reply_markup=_build_admin_order_kb(order_id, user_id))
+                        else:
+                            await bot.send_message(adm, admin_text,
+                                                   reply_markup=_build_admin_order_kb(order_id, user_id))
+                    except Exception:
+                        pass
         return
 
     await message.answer("Используй кнопки меню для заказа. Если есть вопросы — пиши в поддержку.")
@@ -931,7 +958,7 @@ async def text_handler(message: types.Message):
 
 @dp.callback_query(F.data.startswith("confirm_"))
 async def confirm_order(call: types.CallbackQuery):
-    if call.from_user.id != ADMIN:
+    if not is_admin(call.from_user.id):
         return await call.answer("\u26d4\ufe0f Нет доступа.", show_alert=True)
     parts = call.data.split("_")
     order_id, user_id = int(parts[1]), int(parts[2])
@@ -953,8 +980,12 @@ async def confirm_order(call: types.CallbackQuery):
 
     new_qty = decrement_stock(item_name, flavor)
     if new_qty <= LOW_STOCK_THRESHOLD:
-        await bot.send_message(ADMIN,
-            f"\u26a0\ufe0f <b>Товар заканчивается!</b>\n\U0001f4e6 {item_name} — {flavor}\nОстаток: <b>{new_qty} шт.</b>")
+        for adm in ADMINS:
+            try:
+                await bot.send_message(adm,
+                    f"\u26a0\ufe0f <b>Товар заканчивается!</b>\n\U0001f4e6 {item_name} — {flavor}\nОстаток: <b>{new_qty} шт.</b>")
+            except Exception:
+                pass
 
     await call.message.edit_text(call.message.text + "\n\n\u2705 <b>Подтверждено!</b> Склад обновлён.")
     await bot.send_message(user_id,
@@ -963,7 +994,7 @@ async def confirm_order(call: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("reject_"))
 async def reject_order(call: types.CallbackQuery):
-    if call.from_user.id != ADMIN:
+    if not is_admin(call.from_user.id):
         return await call.answer("\u26d4\ufe0f Нет доступа.", show_alert=True)
     parts = call.data.split("_")
     order_id, user_id = int(parts[1]), int(parts[2])
@@ -989,7 +1020,7 @@ async def reject_order(call: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("track_"))
 async def send_track_number(call: types.CallbackQuery):
-    if call.from_user.id != ADMIN:
+    if not is_admin(call.from_user.id):
         return await call.answer("\u26d4\ufe0f Нет доступа.", show_alert=True)
     parts = call.data.split("_")
     order_id, user_id = int(parts[1]), int(parts[2])
@@ -1001,7 +1032,7 @@ async def send_track_number(call: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("delivered_"))
 async def order_delivered(call: types.CallbackQuery):
-    if call.from_user.id != ADMIN:
+    if not is_admin(call.from_user.id):
         return await call.answer("\u26d4\ufe0f Нет доступа.", show_alert=True)
     parts = call.data.split("_")
     order_id, user_id = int(parts[1]), int(parts[2])
@@ -1217,12 +1248,16 @@ async def _save_review(user_id, username, order_id, item_name, flavor, rating, t
     if REVIEWS_CHANNEL_ID:
         kb.row(types.InlineKeyboardButton(text="\U0001f4e2 Опубликовать в канал", callback_data=f"revpub_{review_id}"))
     kb.row(types.InlineKeyboardButton(text="\U0001f5d1 Не публиковать", callback_data=f"revdel_{review_id}"))
-    await bot.send_message(ADMIN, admin_text, reply_markup=kb.as_markup())
+    for adm in ADMINS:
+        try:
+            await bot.send_message(adm, admin_text, reply_markup=kb.as_markup())
+        except Exception:
+            pass
 
 
 @dp.callback_query(F.data.startswith("revpub_"))
 async def review_publish(call: types.CallbackQuery):
-    if call.from_user.id != ADMIN:
+    if not is_admin(call.from_user.id):
         return await call.answer("\u26d4\ufe0f Нет доступа.", show_alert=True)
     if not REVIEWS_CHANNEL_ID:
         return await call.answer("\u26a0\ufe0f REVIEWS_CHANNEL_ID не задан!", show_alert=True)
@@ -1264,7 +1299,7 @@ async def review_publish(call: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("revdel_"))
 async def review_delete(call: types.CallbackQuery):
-    if call.from_user.id != ADMIN:
+    if not is_admin(call.from_user.id):
         return await call.answer("\u26d4\ufe0f Нет доступа.", show_alert=True)
     await call.message.edit_text(call.message.text + "\n\n\U0001f5d1 <b>Не опубликован.</b>")
 
