@@ -8,7 +8,7 @@ import psycopg2.extras
 from flask import Flask
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart, Command
-from aiogram.types import BotCommand
+from aiogram.types import BotCommand, LinkPreviewOptions
 from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
 from aiogram.utils.deep_linking import create_start_link
 from aiogram.client.default import DefaultBotProperties
@@ -509,9 +509,9 @@ async def my_orders_handler(message: types.Message):
     for item, flav, qty, tot, stat, track in rows:
         text += f"▪️ {item} ({flav}) x{qty} шт. — {tot}zł\nСтатус: <b>{stat}</b>"
         if track:
-            text += f"\n📦 Трек: <code>{track}</code>"
+            text += f"\n📦 Трек: <a href='https://inpost.pl/sledzenie-przesylek?number={track}'>{track}</a>"
         text += "\n\n"
-    await message.answer(text)
+    await message.answer(text, link_preview_options=LinkPreviewOptions(is_disabled=True))
 
 
 @dp.message(F.text == "🤝 Поддержка")
@@ -519,7 +519,22 @@ async def support_handler(message: types.Message):
     await message.answer("Связь с менеджером: @Alinagdmo\nПиши по любым вопросам! 🚀")
 
 
-# --- ЧАСТЬ 7: АДМИН-ПАНЕЛЬ СКЛАДА ---
+# --- ЧАСТЬ 7: АДМИН-ПАНЕЛЬ СКЛАДА И СТАТИСТИКА ---
+
+def get_main_admin_keyboard():
+    keyboard = InlineKeyboardBuilder()
+    keyboard.row(types.InlineKeyboardButton(text="📦 Управление складом", callback_data="admin_stock_main"))
+    keyboard.row(types.InlineKeyboardButton(text="📊 Статистика магазина", callback_data="admin_stats"))
+    keyboard.row(types.InlineKeyboardButton(text="📢 Рассылка пользователям", callback_data="adm_broadcast"))
+    return keyboard.as_markup()
+
+def get_admin_brands_keyboard():
+    keyboard = InlineKeyboardBuilder()
+    for brand in BRAND_LIST:
+        idx = brand_to_idx(brand)
+        keyboard.row(types.InlineKeyboardButton(text=f"📦 {brand}", callback_data=f"adm_b_{idx}"))
+    keyboard.row(types.InlineKeyboardButton(text="⬅️ В главное меню", callback_data="admin_main"))
+    return keyboard.as_markup()
 
 def get_admin_stock_keyboard(brand_idx: str):
     brand_name = idx_to_brand(brand_idx)
@@ -537,28 +552,70 @@ def get_admin_stock_keyboard(brand_idx: str):
             types.InlineKeyboardButton(text="🔄 Сброс", callback_data=f"adm_r_{brand_idx}_{i}"),
         )
 
-    keyboard.row(types.InlineKeyboardButton(text="⬅️ К брендам", callback_data="adm_brands"))
-    return keyboard.as_markup()
-
-def get_admin_brands_keyboard():
-    keyboard = InlineKeyboardBuilder()
-    for brand in BRAND_LIST:
-        idx = brand_to_idx(brand)
-        keyboard.row(types.InlineKeyboardButton(text=f"📦 {brand}", callback_data=f"adm_b_{idx}"))
-    keyboard.row(types.InlineKeyboardButton(text="📢 Рассылка", callback_data="adm_broadcast"))
+    keyboard.row(types.InlineKeyboardButton(text="⬅️ К брендам", callback_data="admin_stock_main"))
     return keyboard.as_markup()
 
 @dp.message(Command("admin"))
 async def admin_panel(message: types.Message):
     if not is_admin(message.from_user.id):
         return await message.answer("⛔️ Нет доступа.")
-    await message.answer("⚙️ <b>Админ-панель</b>\n\nВыбери раздел:", reply_markup=get_admin_brands_keyboard())
+    await message.answer("⚙️ <b>Главная Админ-панель</b>\n\nЧто будем делать?", reply_markup=get_main_admin_keyboard())
 
-@dp.callback_query(F.data == "adm_brands")
+@dp.callback_query(F.data == "admin_main")
+async def admin_main_menu(call: types.CallbackQuery):
+    if not is_admin(call.from_user.id): return
+    await call.message.edit_text("⚙️ <b>Главная Админ-панель</b>\n\nЧто будем делать?", reply_markup=get_main_admin_keyboard())
+
+@dp.callback_query(F.data == "admin_stock_main")
 async def adm_brands(call: types.CallbackQuery):
     if not is_admin(call.from_user.id):
         return await call.answer("⛔️ Нет доступа.", show_alert=True)
-    await call.message.edit_text("⚙️ <b>Админ-панель</b>\n\nВыбери раздел:", reply_markup=get_admin_brands_keyboard())
+    await call.message.edit_text("⚙️ <b>Склад магазина</b>\n\nВыбери бренд для управления остатками:", reply_markup=get_admin_brands_keyboard())
+
+@dp.callback_query(F.data == "admin_stats")
+async def admin_statistics(call: types.CallbackQuery):
+    if not is_admin(call.from_user.id): return
+    
+    conn = get_conn()
+    cur = conn.cursor()
+    
+    # Считаем пользователей
+    cur.execute("SELECT COUNT(*) FROM users")
+    users_count = cur.fetchone()[0]
+    
+    # Считаем успешные заказы и кассу
+    cur.execute("SELECT SUM(total), COUNT(*) FROM orders WHERE status IN ('Подтверждён', 'Доставлен', 'В пути')")
+    sales_data = cur.fetchone()
+    total_revenue = sales_data[0] or 0
+    total_orders = sales_data[1] or 0
+    
+    # Топ 3 самых продаваемых вкуса
+    cur.execute("""
+        SELECT item_name, flavor, SUM(quantity) as sold 
+        FROM orders 
+        WHERE status IN ('Подтверждён', 'Доставлен', 'В пути') 
+        GROUP BY item_name, flavor 
+        ORDER BY sold DESC LIMIT 3
+    """)
+    top_flavors = cur.fetchall()
+    conn.close()
+    
+    text = f"📊 <b>Статистика Cloude Atmosphere:</b>\n\n"
+    text += f"👥 Всего клиентов в боте: <b>{users_count}</b>\n"
+    text += f"🛍 Успешных заказов: <b>{total_orders}</b>\n"
+    text += f"💰 Общая выручка: <b>{total_revenue} zł</b>\n\n"
+    
+    text += f"🏆 <b>Топ-3 продаж:</b>\n"
+    if top_flavors:
+        for t in top_flavors:
+            text += f"▪️ {t[0]} ({t[1]}) — {t[2]} шт.\n"
+    else:
+        text += "Пока нет подтвержденных продаж.\n"
+        
+    kb = InlineKeyboardBuilder()
+    kb.row(types.InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_main"))
+    await call.message.edit_text(text, reply_markup=kb.as_markup())
+
 
 @dp.callback_query(F.data == "adm_broadcast")
 async def adm_broadcast_start(call: types.CallbackQuery):
@@ -870,6 +927,18 @@ async def back_to_cats(call: types.CallbackQuery):
 
 # --- ЧАСТЬ 9: ОБРАБОТКА ТЕКСТА И ФОТО ---
 
+# Доп. команда для обнуления кассы
+@dp.message(Command("reset_kassa"))
+async def reset_kassa_command(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE orders SET status = 'Тестовый' WHERE status = 'Подтверждён'")
+    conn.commit()
+    conn.close()
+    await message.answer("✅ Касса успешно обнулена! Все прошлые заказы переведены в статус 'Тестовый'.")
+
 @dp.message(F.photo)
 async def photo_handler(message: types.Message):
     if ADMIN and is_admin(message.from_user.id) and message.from_user.id not in PAYMENT_PENDING:
@@ -923,7 +992,8 @@ async def text_handler(message: types.Message):
         try:
             await bot.send_message(buyer_id,
                 f"📦 <b>Твой заказ отправлен!</b>\n\nТрек-номер: <code>{track}</code>\n"
-                "Отследить посылку можно на сайте службы доставки. 🚀")
+                f"Отследить посылку InPost: <a href='https://inpost.pl/sledzenie-przesylek?number={track}'>Нажми сюда</a> 🚀",
+                link_preview_options=LinkPreviewOptions(is_disabled=True))
         except Exception:
             await message.answer("⚠️ Не удалось уведомить пользователя.")
         return
