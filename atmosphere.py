@@ -1,5 +1,6 @@
 import asyncio
 import os
+import json
 import logging
 import threading
 import psycopg2
@@ -12,6 +13,12 @@ from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
 from aiogram.utils.deep_linking import create_start_link
 from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+    GSPREAD_AVAILABLE = True
+except ImportError:
+    GSPREAD_AVAILABLE = False
 
 # --- ЧАСТЬ 1: СЕРВЕР ДЛЯ ПОДДЕРЖАНИЯ ЖИЗНИ ---
 app = Flask('')
@@ -45,8 +52,54 @@ REVIEWS_CHANNEL_ID = int(REVIEWS_CHANNEL_ID_ENV) if REVIEWS_CHANNEL_ID_ENV else 
 
 DATABASE_URL = os.getenv('DATABASE_URL')  # Подключение к Supabase
 
-PHONE_NUMBER = "+48 123 456 789"
+PHONE_NUMBER = "536169149"
 REVIEWS_URL = "https://t.me/+cbqxYZH0tzE4MDUy"
+
+SHEETS_ID = os.getenv('SHEETS_ID')
+GOOGLE_CREDS_JSON = os.getenv('GOOGLE_CREDS_JSON')
+
+def get_sheet():
+    if not GSPREAD_AVAILABLE or not SHEETS_ID or not GOOGLE_CREDS_JSON:
+        return None
+    try:
+        creds_dict = json.loads(GOOGLE_CREDS_JSON)
+        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        client = gspread.authorize(creds)
+        sheet = client.open_by_key(SHEETS_ID).sheet1
+        return sheet
+    except Exception as e:
+        logging.error(f"Google Sheets error: {e}")
+        return None
+
+def init_sheet_headers():
+    sheet = get_sheet()
+    if not sheet:
+        return
+    try:
+        if sheet.row_values(1) == []:
+            sheet.append_row([
+                "Дата", "Заказ №", "Юзернейм", "User ID",
+                "Товар", "Вкус", "Сумма (zł)", "Доставка", "Статус"
+            ])
+    except Exception as e:
+        logging.error(f"Sheet header init error: {e}")
+
+async def append_order_to_sheet(order_id, username, user_id, item_name, flavor, total, delivery):
+    def _write():
+        sheet = get_sheet()
+        if not sheet:
+            return
+        from datetime import datetime
+        date_str = datetime.now().strftime("%d.%m.%Y %H:%M")
+        try:
+            sheet.append_row([
+                date_str, order_id, f"@{username}", str(user_id),
+                item_name, flavor, total, delivery, "Подтверждён"
+            ])
+        except Exception as e:
+            logging.error(f"Sheet append error: {e}")
+    await asyncio.get_event_loop().run_in_executor(None, _write)
 
 REFERRAL_BONUS = 5
 LOW_STOCK_THRESHOLD = 2
@@ -651,7 +704,7 @@ async def payment_callback(call: types.CallbackQuery):
         pay_text += f"\U0001f381 Бонусная скидка: -{bonus_int}zł\n"
     pay_text += (
         f"<b>Сумма к оплате: {final_total}zł</b>\n\n"
-        f"Переведи ровную сумму по BLIK на номер:\n<code>{"+48536169149"}</code>\n\n"
+        f"Переведи ровную сумму по BLIK на номер:\n<code>{PHONE_NUMBER}</code>\n\n"
         "\U0001f4f8 После оплаты пришли <b>скриншот чека</b> следующим сообщением.\n"
         "Или нажми кнопку ниже если не можешь отправить фото."
     )
@@ -991,6 +1044,16 @@ async def confirm_order(call: types.CallbackQuery):
     await bot.send_message(user_id,
         "\u2705 <b>Оплата подтверждена!</b>\nТвой заказ принят в обработку. Скоро получишь трек-номер. \U0001f680")
 
+    # Записать в Google Sheets
+    conn2 = get_conn()
+    cur2 = conn2.cursor()
+    cur2.execute("SELECT username, item_name, flavor, total, delivery FROM orders WHERE order_id = %s", (order_id,))
+    row2 = cur2.fetchone()
+    conn2.close()
+    if row2:
+        uname, iname, iflav, itotal, idel = row2
+        await append_order_to_sheet(order_id, uname or "нет", user_id, iname, iflav, itotal, idel)
+
 
 @dp.callback_query(F.data.startswith("reject_"))
 async def reject_order(call: types.CallbackQuery):
@@ -1307,6 +1370,7 @@ async def review_delete(call: types.CallbackQuery):
 # --- ЗАПУСК ---
 async def main():
     init_db()
+    init_sheet_headers()
     await set_main_menu_button(bot)
     threading.Thread(target=run_server, daemon=True).start()
     await dp.start_polling(bot)

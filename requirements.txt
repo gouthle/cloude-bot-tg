@@ -2,3 +2,6 @@ aiogram==3.7.0
 flask
 python-dotenv
 psycopg2-binary
+aiofiles
+gspread
+google-auth
