@@ -20,7 +20,7 @@ try:
 except ImportError:
     GSPREAD_AVAILABLE = False
 
-# --- ЧАСТЬ 1: СЕРВЕР ДЛЯ ПОДДЕРЖАНИЯ ЖИЗНИ ---
+# --- ЧАСТЬ 1: СЕРВЕР ДЛЯ ПОДДЕРЖАНИЯ ЖИЗНИ (RENDER) ---
 app = Flask('')
 
 @app.route('/')
@@ -50,7 +50,7 @@ def is_admin(user_id: int) -> bool:
 REVIEWS_CHANNEL_ID_ENV = os.getenv('REVIEWS_CHANNEL_ID')
 REVIEWS_CHANNEL_ID = int(REVIEWS_CHANNEL_ID_ENV) if REVIEWS_CHANNEL_ID_ENV else None
 
-DATABASE_URL = os.getenv('DATABASE_URL')  # Подключение к Supabase
+DATABASE_URL = os.getenv('DATABASE_URL')  # Подключение к PostgreSQL/Supabase
 
 PHONE_NUMBER = "536169149"
 REVIEWS_URL = "https://t.me/+cbqxYZH0tzE4MDUy"
@@ -58,6 +58,9 @@ REVIEWS_URL = "https://t.me/+cbqxYZH0tzE4MDUy"
 SHEETS_ID = os.getenv('SHEETS_ID')
 GOOGLE_CREDS_JSON = os.getenv('GOOGLE_CREDS_JSON')
 
+ORDER_GROUP_ID = -5071178358  # Группа для отчетов
+
+# --- GOOGLE SHEETS ЛОГИКА ---
 def get_sheet():
     if not GSPREAD_AVAILABLE or not SHEETS_ID or not GOOGLE_CREDS_JSON:
         return None
@@ -74,28 +77,26 @@ def get_sheet():
 
 def init_sheet_headers():
     sheet = get_sheet()
-    if not sheet:
-        return
+    if not sheet: return
     try:
-        if sheet.row_values(1) == []:
+        if not sheet.get_all_values():
             sheet.append_row([
-                "Дата", "Заказ №", "Юзернейм", "User ID",
-                "Товар", "Вкус", "Сумма (zł)", "Доставка", "Статус"
+                "Дата и время", "Заказ №", "Юзернейм", 
+                "Товар", "Доставка", "Сумма заказа (zł)", "Общая касса (zł)"
             ])
     except Exception as e:
         logging.error(f"Sheet header init error: {e}")
 
-async def append_order_to_sheet(order_id, username, user_id, item_name, flavor, total, delivery):
+async def append_order_to_sheet(order_id, username, item_name, flavor, qty, total, delivery, total_revenue):
     def _write():
         sheet = get_sheet()
-        if not sheet:
-            return
+        if not sheet: return
         from datetime import datetime
-        date_str = datetime.now().strftime("%d.%m.%Y %H:%M")
+        date_str = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
         try:
             sheet.append_row([
-                date_str, order_id, f"@{username}", str(user_id),
-                item_name, flavor, total, delivery, "Подтверждён"
+                date_str, order_id, f"@{username}", 
+                f"{item_name} — {flavor} (x{qty})", delivery, total, total_revenue
             ])
         except Exception as e:
             logging.error(f"Sheet append error: {e}")
@@ -107,8 +108,27 @@ LOW_STOCK_THRESHOLD = 2
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 
-# --- ЧАСТЬ 3: РАБОТА С БАЗОЙ ДАННЫХ (PostgreSQL) ---
+# --- ОТЧЕТЫ В ГРУППУ ---
+async def send_group_report(order_id, username, item, flavor, qty, total, delivery, total_revenue):
+    from datetime import datetime
+    date_str = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+    report_text = (
+        f"💰 <b>ЗАКАЗ №{order_id} ОПЛАЧЕН</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"⏰ Время: {date_str}\n"
+        f"👤 Клиент: @{username}\n"
+        f"📦 Заказ: {item} — {flavor} (<b>{qty} шт.</b>)\n"
+        f"🚚 Доставка: {delivery}\n"
+        f"💵 Сумма заказа: <b>{total} zł</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"📊 <b>Общая касса: {total_revenue} zł</b>"
+    )
+    try:
+        await bot.send_message(ORDER_GROUP_ID, report_text)
+    except Exception as e:
+        logging.error(f"Error sending group report: {e}")
 
+# --- ЧАСТЬ 3: РАБОТА С БАЗОЙ ДАННЫХ (PostgreSQL) ---
 def get_conn():
     return psycopg2.connect(DATABASE_URL, sslmode='require')
 
@@ -246,7 +266,6 @@ def init_db():
             date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    # Миграция: добавляем колонку quantity, если её нет
     try:
         cur.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS quantity INTEGER DEFAULT 1")
     except Exception:
@@ -365,7 +384,6 @@ PAYMENT_PENDING = {}
 REVIEW_PENDING = {}
 
 # --- ЧАСТЬ 6: ХЕНДЛЕРЫ МЕНЮ ---
-
 @dp.message(CommandStart())
 async def start_handler(message: types.Message):
     start_command = message.text.split()
@@ -493,7 +511,6 @@ async def support_handler(message: types.Message):
 
 
 # --- ЧАСТЬ 7: АДМИН-ПАНЕЛЬ СКЛАДА ---
-
 def get_admin_stock_keyboard(brand_idx: str):
     brand_name = idx_to_brand(brand_idx)
     brand_data = STOCKS.get(brand_name, {})
@@ -596,7 +613,6 @@ async def adm_stock_action(call: types.CallbackQuery):
 
 
 # --- ЧАСТЬ 8: ВИТРИНА — INLINE CALLBACKS ---
-
 @dp.callback_query(F.data.startswith("brn_"))
 async def flavors_callback(call: types.CallbackQuery):
     brand_idx = call.data.split("_", 1)[1]
@@ -627,13 +643,10 @@ async def flavors_callback(call: types.CallbackQuery):
     else:
         await call.message.edit_text(caption, reply_markup=keyboard.as_markup())
 
-
 @dp.callback_query(F.data == "soldout")
 async def soldout_handler(call: types.CallbackQuery):
     await call.answer("😔 Этого вкуса нет в наличии. Выбери другой!", show_alert=True)
 
-
-# НОВЫЙ ХЕНДЛЕР: ВЫБОР КОЛИЧЕСТВА
 @dp.callback_query(F.data.startswith("sl_"))
 async def quantity_callback(call: types.CallbackQuery):
     parts = call.data.split("_")
@@ -653,7 +666,7 @@ async def quantity_callback(call: types.CallbackQuery):
         return await call.answer("Только что разобрали!", show_alert=True)
 
     price = brand_data["price"]
-    max_qty = min(stock, 10) # Максимум 10 кнопок для удобства
+    max_qty = min(stock, 10)
 
     keyboard = InlineKeyboardBuilder()
     row1 = []
@@ -680,8 +693,6 @@ async def quantity_callback(call: types.CallbackQuery):
     await call.message.delete()
     await call.bot.send_message(call.from_user.id, text, reply_markup=keyboard.as_markup())
 
-
-# НОВЫЙ ХЕНДЛЕР: ВЫБОР ДОСТАВКИ
 @dp.callback_query(F.data.startswith("deliv_"))
 async def delivery_callback(call: types.CallbackQuery):
     parts = call.data.split("_")
@@ -692,11 +703,8 @@ async def delivery_callback(call: types.CallbackQuery):
     flavor = brand_data.get("flavors", [])[int(flavor_idx)]
     base_price = brand_data["price"] * qty
 
-    # -------------------------------------------------------------
-    # НАСТРОЙКИ ДОСТАВКИ
     inpost_pl_price = 0 if qty >= 5 else 14
-    inpost_eu_price = 25  # <-- ТУТ МОЖЕШЬ ИЗМЕНИТЬ ЦЕНУ ДОСТАВКИ EU
-    # -------------------------------------------------------------
+    inpost_eu_price = 25
 
     balance = get_balance(call.from_user.id)
     keyboard = InlineKeyboardBuilder()
@@ -743,7 +751,7 @@ async def payment_callback(call: types.CallbackQuery):
         delivery_price = 0 if qty >= 5 else 14
         delivery_name = "InPost (Польша)"
     else:
-        delivery_price = 25 # Цена доставки EU (совпадает с настройкой выше)
+        delivery_price = 25
         delivery_name = "InPost EU"
 
     total_price = base_price + delivery_price
@@ -798,7 +806,6 @@ async def finish_callback(call: types.CallbackQuery):
         message=call.message, is_callback=True
     )
 
-
 def _build_admin_order_kb(order_id, user_id):
     kb = InlineKeyboardBuilder()
     kb.row(
@@ -808,7 +815,6 @@ def _build_admin_order_kb(order_id, user_id):
     kb.row(types.InlineKeyboardButton(text="🚛 Отправить трек", callback_data=f"track_{order_id}_{user_id}"))
     kb.row(types.InlineKeyboardButton(text="📦 Доставлено", callback_data=f"delivered_{order_id}_{user_id}"))
     return kb.as_markup()
-
 
 async def _create_order(bot, user_id, username, brand_name, flavor, qty, total, delivery,
                         bonus_used, photo_id, message, is_callback=False):
@@ -826,7 +832,6 @@ async def _create_order(bot, user_id, username, brand_name, flavor, qty, total, 
     if bonus_used > 0:
         spend_balance(user_id, bonus_used)
 
-    # Теперь всегда собираем данные для доставки
     set_collect(user_id, {"step": "name", "order_id": order_id,
                            "name": "", "phone": "", "email": "", "paczkomat": ""})
     text = f"📝 <b>Данные для доставки ({delivery})</b>\n\nШаг 1/4 — Напиши своё <b>полное имя и фамилию</b>:"
@@ -835,7 +840,6 @@ async def _create_order(bot, user_id, username, brand_name, flavor, qty, total, 
         await message.edit_text(text)
     else:
         await bot.send_message(user_id, text)
-
 
 @dp.callback_query(F.data == "back_to_cats")
 async def back_to_cats(call: types.CallbackQuery):
@@ -848,7 +852,6 @@ async def back_to_cats(call: types.CallbackQuery):
 
 
 # --- ЧАСТЬ 9: ОБРАБОТКА ТЕКСТА И ФОТО ---
-
 @dp.message(F.photo)
 async def photo_handler(message: types.Message):
     if ADMIN and is_admin(message.from_user.id) and message.from_user.id not in PAYMENT_PENDING:
@@ -877,7 +880,6 @@ async def photo_handler(message: types.Message):
 async def text_handler(message: types.Message):
     user_id = message.from_user.id
 
-    # Рассылка от админа
     if is_admin(user_id) and user_id in BROADCAST_PENDING:
         BROADCAST_PENDING.discard(user_id)
         all_users = get_all_user_ids()
@@ -891,7 +893,6 @@ async def text_handler(message: types.Message):
         await message.answer(f"✅ Рассылка завершена!\nОтправлено: {sent}\nОшибок: {failed}")
         return
 
-    # Трек-номер от админа
     if is_admin(user_id) and user_id in TRACK_PENDING:
         order_id, buyer_id = TRACK_PENDING.pop(user_id)
         track = message.text.strip()
@@ -909,7 +910,6 @@ async def text_handler(message: types.Message):
             await message.answer("⚠️ Не удалось уведомить пользователя.")
         return
 
-    # Ввод устройства текстом
     if user_id in REVIEW_PENDING and REVIEW_PENDING[user_id].get("step") == "device":
         REVIEW_PENDING[user_id]["device"] = message.text.strip()
         REVIEW_PENDING[user_id]["step"] = "text"
@@ -926,7 +926,6 @@ async def text_handler(message: types.Message):
         )
         return
 
-    # Текстовый комментарий к отзыву
     if user_id in REVIEW_PENDING and REVIEW_PENDING[user_id].get("step") == "text":
         pending = REVIEW_PENDING.pop(user_id)
         await _save_review(
@@ -940,7 +939,6 @@ async def text_handler(message: types.Message):
                              reply_markup=get_main_keyboard())
         return
 
-    # Пошаговый сбор данных доставки
     if collect_exists(user_id):
         collect = get_collect(user_id)
         step = collect["step"]
@@ -1019,52 +1017,57 @@ async def text_handler(message: types.Message):
 
 
 # --- ЧАСТЬ 10: ПОДТВЕРЖДЕНИЕ / ОТКЛОНЕНИЕ / ТРЕК ---
-
 @dp.callback_query(F.data.startswith("confirm_"))
 async def confirm_order(call: types.CallbackQuery):
     if not is_admin(call.from_user.id):
         return await call.answer("⛔️ Нет доступа.", show_alert=True)
+    
     parts = call.data.split("_")
     order_id, user_id = int(parts[1]), int(parts[2])
 
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT item_name, flavor, status, quantity FROM orders WHERE order_id = %s", (order_id,))
+    
+    cur.execute("""
+        SELECT o.item_name, o.flavor, o.quantity, o.total, o.delivery, o.status, u.username 
+        FROM orders o 
+        LEFT JOIN users u ON o.user_id = u.user_id 
+        WHERE o.order_id = %s
+    """, (order_id,))
     row = cur.fetchone()
+    
     if not row:
         conn.close()
         return await call.answer("Заказ не найден", show_alert=True)
-    item_name, flavor, status, quantity = row
+    
+    item_name, flavor, qty, total, delivery, status, username = row
+    username_str = username if username else str(user_id)
+    
     if status == "Подтверждён":
         conn.close()
         return await call.answer("Заказ уже подтверждён!", show_alert=True)
+
     cur.execute("UPDATE orders SET status = 'Подтверждён' WHERE order_id = %s", (order_id,))
+    
+    cur.execute("SELECT SUM(total) FROM orders WHERE status = 'Подтверждён'")
+    total_revenue = cur.fetchone()[0] or 0
+    
     conn.commit()
     conn.close()
 
-    new_qty = decrement_stock(item_name, flavor, amount=quantity)
+    new_qty = decrement_stock(item_name, flavor, amount=qty)
     if new_qty <= LOW_STOCK_THRESHOLD:
         for adm in ADMINS:
             try:
-                await bot.send_message(adm,
-                    f"⚠️ <b>Товар заканчивается!</b>\n📦 {item_name} — {flavor}\nОстаток: <b>{new_qty} шт.</b>")
+                await bot.send_message(adm, f"⚠️ <b>Товар заканчивается!</b>\n📦 {item_name} — {flavor}\nОстаток: <b>{new_qty} шт.</b>")
             except Exception:
                 pass
+    
+    await call.message.edit_text(call.message.text + "\n\n✅ <b>Подтверждено!</b>")
+    await bot.send_message(user_id, "✅ <b>Оплата подтверждена!</b>\nТвой заказ принят в обработку. Скоро получишь трек-номер. 🚀")
 
-    await call.message.edit_text(call.message.text + "\n\n✅ <b>Подтверждено!</b> Склад обновлён.")
-    await bot.send_message(user_id,
-        "✅ <b>Оплата подтверждена!</b>\nТвой заказ принят в обработку. Скоро получишь трек-номер. 🚀")
-
-    # Записать в Google Sheets
-    conn2 = get_conn()
-    cur2 = conn2.cursor()
-    cur2.execute("SELECT username, item_name, flavor, quantity, total, delivery FROM orders WHERE order_id = %s", (order_id,))
-    row2 = cur2.fetchone()
-    conn2.close()
-    if row2:
-        uname, iname, iflav, iqty, itotal, idel = row2
-        await append_order_to_sheet(order_id, uname or "нет", user_id, iname, f"{iflav} (x{iqty})", itotal, idel)
-
+    await append_order_to_sheet(order_id, username_str, item_name, flavor, qty, total, delivery, total_revenue)
+    await send_group_report(order_id, username_str, item_name, flavor, qty, total, delivery, total_revenue)
 
 @dp.callback_query(F.data.startswith("reject_"))
 async def reject_order(call: types.CallbackQuery):
@@ -1091,7 +1094,6 @@ async def reject_order(call: types.CallbackQuery):
     await bot.send_message(user_id,
         "❌ <b>Оплата не найдена.</b>\nПроверь перевод. Вопросы — в поддержку 🤝")
 
-
 @dp.callback_query(F.data.startswith("track_"))
 async def send_track_number(call: types.CallbackQuery):
     if not is_admin(call.from_user.id):
@@ -1103,7 +1105,6 @@ async def send_track_number(call: types.CallbackQuery):
 
 
 # --- ЧАСТЬ 11: СИСТЕМА ОТЗЫВОВ ---
-
 @dp.callback_query(F.data.startswith("delivered_"))
 async def order_delivered(call: types.CallbackQuery):
     if not is_admin(call.from_user.id):
@@ -1142,7 +1143,6 @@ async def order_delivered(call: types.CallbackQuery):
     except Exception:
         await call.answer("⚠️ Не удалось отправить запрос отзыва.", show_alert=True)
 
-
 @dp.callback_query(F.data.startswith("revrate_"))
 async def review_rating(call: types.CallbackQuery):
     parts = call.data.split("_")
@@ -1178,11 +1178,10 @@ async def review_rating(call: types.CallbackQuery):
         reply_markup=kb.as_markup()
     )
 
-
 @dp.callback_query(F.data.startswith("revparam_"))
 async def review_param(call: types.CallbackQuery):
     parts = call.data.split("_")
-    param, value, order_id = parts[1], int(parts[2]), int(parts[3])
+    param, value, order_id = parts[1], int(parts[2], int(parts[3]))
 
     user_id = call.from_user.id
     if user_id not in REVIEW_PENDING:
@@ -1247,7 +1246,6 @@ async def review_device(call: types.CallbackQuery):
         reply_markup=kb.as_markup()
     )
 
-
 @dp.callback_query(F.data.startswith("revnotext_"))
 async def review_no_text(call: types.CallbackQuery):
     parts = call.data.split("_")
@@ -1270,11 +1268,9 @@ async def review_no_text(call: types.CallbackQuery):
     )
     await call.message.edit_text("💬 Спасибо за оценку! Это помогает нам становиться лучше ☁️")
 
-
 @dp.callback_query(F.data.startswith("revskip_"))
 async def review_skip(call: types.CallbackQuery):
     await call.message.edit_text("Хорошо! Если захочешь — оставь отзыв через ⭐️ Отзывы 😊")
-
 
 def _format_bar(value):
     if value is None:
@@ -1282,7 +1278,6 @@ def _format_bar(value):
     filled = "█" * value
     empty = "░" * (5 - value)
     return f"{filled}{empty} {value}/5"
-
 
 async def _save_review(user_id, username, order_id, item_name, flavor, rating, text,
                        strength=None, taste=None, vapor=None, device=None):
@@ -1328,7 +1323,6 @@ async def _save_review(user_id, username, order_id, item_name, flavor, rating, t
         except Exception:
             pass
 
-
 @dp.callback_query(F.data.startswith("revpub_"))
 async def review_publish(call: types.CallbackQuery):
     if not is_admin(call.from_user.id):
@@ -1369,7 +1363,6 @@ async def review_publish(call: types.CallbackQuery):
         await call.message.edit_text(call.message.text + "\n\n✅ <b>Опубликовано в канал!</b>")
     except Exception as e:
         await call.answer(f"Ошибка: {e}", show_alert=True)
-
 
 @dp.callback_query(F.data.startswith("revdel_"))
 async def review_delete(call: types.CallbackQuery):
