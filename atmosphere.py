@@ -50,7 +50,7 @@ def is_admin(user_id: int) -> bool:
 REVIEWS_CHANNEL_ID_ENV = os.getenv('REVIEWS_CHANNEL_ID')
 REVIEWS_CHANNEL_ID = int(REVIEWS_CHANNEL_ID_ENV) if REVIEWS_CHANNEL_ID_ENV else None
 
-DATABASE_URL = os.getenv('DATABASE_URL')  # Подключение к Supabase
+DATABASE_URL = os.getenv('DATABASE_URL')
 
 PHONE_NUMBER = "536169149"
 REVIEWS_URL = "https://t.me/+cbqxYZH0tzE4MDUy"
@@ -58,7 +58,6 @@ REVIEWS_URL = "https://t.me/+cbqxYZH0tzE4MDUy"
 SHEETS_ID = os.getenv('SHEETS_ID')
 GOOGLE_CREDS_JSON = os.getenv('GOOGLE_CREDS_JSON')
 
-# Чтение ID группы из переменных Render
 ORDER_GROUP_ID_ENV = os.getenv('ORDER_GROUP_ID')
 ORDER_GROUP_ID = int(ORDER_GROUP_ID_ENV) if ORDER_GROUP_ID_ENV else None
 
@@ -78,8 +77,7 @@ def get_sheet():
 
 def init_sheet_headers():
     sheet = get_sheet()
-    if not sheet:
-        return
+    if not sheet: return
     try:
         if not sheet.get_all_values():
             sheet.append_row([
@@ -92,8 +90,7 @@ def init_sheet_headers():
 async def append_order_to_sheet(order_id, username, item_name, flavor, qty, total, delivery, total_revenue):
     def _write():
         sheet = get_sheet()
-        if not sheet:
-            return
+        if not sheet: return
         from datetime import datetime
         date_str = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
         try:
@@ -111,7 +108,6 @@ LOW_STOCK_THRESHOLD = 2
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 
-# --- ОТЧЕТЫ В ГРУППУ ---
 async def send_group_report(order_id, username, item, flavor, qty, total, delivery, total_revenue):
     if not ORDER_GROUP_ID:
         logging.error("❌ ORDER_GROUP_ID не найден в переменных среды Render")
@@ -136,9 +132,37 @@ async def send_group_report(order_id, username, item, flavor, qty, total, delive
         logging.error(f"Error sending group report: {e}")
 
 
-# --- ЧАСТЬ 3: РАБОТА С БАЗОЙ ДАННЫХ (PostgreSQL) ---
+# --- ЧАСТЬ 3: РАБОТА С БАЗОЙ ДАННЫХ И КОРЗИНОЙ ---
 def get_conn():
     return psycopg2.connect(DATABASE_URL, sslmode='require')
+
+# Логика Корзины
+def get_cart(user_id: int):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT brand, flavor, quantity, price FROM cart WHERE user_id = %s", (user_id,))
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+def add_to_cart(user_id: int, brand: str, flavor: str, qty: int, price: int):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT quantity FROM cart WHERE user_id = %s AND brand = %s AND flavor = %s", (user_id, brand, flavor))
+    row = cur.fetchone()
+    if row:
+        cur.execute("UPDATE cart SET quantity = quantity + %s WHERE user_id = %s AND brand = %s AND flavor = %s", (qty, user_id, brand, flavor))
+    else:
+        cur.execute("INSERT INTO cart (user_id, brand, flavor, quantity, price) VALUES (%s, %s, %s, %s, %s)", (user_id, brand, flavor, qty, price))
+    conn.commit()
+    conn.close()
+
+def clear_cart(user_id: int):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM cart WHERE user_id = %s", (user_id,))
+    conn.commit()
+    conn.close()
 
 def get_stock(brand: str, flavor: str) -> int:
     conn = get_conn()
@@ -259,6 +283,17 @@ def init_db():
     """)
 
     cur.execute("""
+        CREATE TABLE IF NOT EXISTS cart (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
+            brand TEXT,
+            flavor TEXT,
+            quantity INTEGER,
+            price INTEGER
+        )
+    """)
+
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS orders (
             order_id SERIAL PRIMARY KEY,
             user_id BIGINT,
@@ -271,11 +306,13 @@ def init_db():
             status TEXT DEFAULT 'Ожидает оплаты',
             track_number TEXT DEFAULT NULL,
             photo_id TEXT DEFAULT NULL,
+            cart_data TEXT DEFAULT '[]',
             date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
     try:
         cur.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS quantity INTEGER DEFAULT 1")
+        cur.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS cart_data TEXT DEFAULT '[]'")
     except Exception:
         pass
 
@@ -381,9 +418,9 @@ async def set_main_menu_button(bot: Bot):
 
 def get_main_keyboard():
     builder = ReplyKeyboardBuilder()
-    builder.row(types.KeyboardButton(text="☁️ Витрина"), types.KeyboardButton(text="📥 Мои заказы"))
-    builder.row(types.KeyboardButton(text="💰 Бонусы"), types.KeyboardButton(text="⭐️ Отзывы"))
-    builder.row(types.KeyboardButton(text="🤝 Поддержка"))
+    builder.row(types.KeyboardButton(text="☁️ Витрина"), types.KeyboardButton(text="🛒 Корзина"))
+    builder.row(types.KeyboardButton(text="📥 Мои заказы"), types.KeyboardButton(text="💰 Бонусы"))
+    builder.row(types.KeyboardButton(text="⭐️ Отзывы"), types.KeyboardButton(text="🤝 Поддержка"))
     return builder.as_markup(resize_keyboard=True)
 
 BROADCAST_PENDING = set()
@@ -579,17 +616,14 @@ async def admin_statistics(call: types.CallbackQuery):
     conn = get_conn()
     cur = conn.cursor()
     
-    # Считаем пользователей
     cur.execute("SELECT COUNT(*) FROM users")
     users_count = cur.fetchone()[0]
     
-    # Считаем успешные заказы и кассу
     cur.execute("SELECT SUM(total), COUNT(*) FROM orders WHERE status IN ('Подтверждён', 'Доставлен', 'В пути')")
     sales_data = cur.fetchone()
     total_revenue = sales_data[0] or 0
     total_orders = sales_data[1] or 0
     
-    # Топ 3 самых продаваемых вкуса
     cur.execute("""
         SELECT item_name, flavor, SUM(quantity) as sold 
         FROM orders 
@@ -679,7 +713,7 @@ async def adm_stock_action(call: types.CallbackQuery):
     await call.message.edit_reply_markup(reply_markup=get_admin_stock_keyboard(brand_idx))
 
 
-# --- ЧАСТЬ 8: ВИТРИНА — INLINE CALLBACKS ---
+# --- ЧАСТЬ 8: ВИТРИНА И КОРЗИНА — INLINE CALLBACKS ---
 
 @dp.callback_query(F.data.startswith("brn_"))
 async def flavors_callback(call: types.CallbackQuery):
@@ -741,13 +775,13 @@ async def quantity_callback(call: types.CallbackQuery):
     keyboard = InlineKeyboardBuilder()
     row1 = []
     for q in range(1, min(6, max_qty + 1)):
-        row1.append(types.InlineKeyboardButton(text=f"{q} шт.", callback_data=f"deliv_{brand_idx}_{flavor_idx}_{q}"))
+        row1.append(types.InlineKeyboardButton(text=f"{q} шт.", callback_data=f"addcart_{brand_idx}_{flavor_idx}_{q}"))
     keyboard.row(*row1)
 
     if max_qty > 5:
         row2 = []
         for q in range(6, max_qty + 1):
-            row2.append(types.InlineKeyboardButton(text=f"{q} шт.", callback_data=f"deliv_{brand_idx}_{flavor_idx}_{q}"))
+            row2.append(types.InlineKeyboardButton(text=f"{q} шт.", callback_data=f"addcart_{brand_idx}_{flavor_idx}_{q}"))
         keyboard.row(*row2)
 
     keyboard.row(types.InlineKeyboardButton(text="⬅️ Назад к вкусам", callback_data=f"brn_{brand_idx}"))
@@ -764,17 +798,83 @@ async def quantity_callback(call: types.CallbackQuery):
     await call.bot.send_message(call.from_user.id, text, reply_markup=keyboard.as_markup())
 
 
-@dp.callback_query(F.data.startswith("deliv_"))
-async def delivery_callback(call: types.CallbackQuery):
+# Добавление в корзину
+@dp.callback_query(F.data.startswith("addcart_"))
+async def add_to_cart_callback(call: types.CallbackQuery):
     parts = call.data.split("_")
     brand_idx, flavor_idx, qty = parts[1], parts[2], int(parts[3])
-
     brand_name = idx_to_brand(brand_idx)
-    brand_data = STOCKS.get(brand_name)
-    flavor = brand_data.get("flavors", [])[int(flavor_idx)]
-    base_price = brand_data["price"] * qty
+    flavor = STOCKS[brand_name]["flavors"][int(flavor_idx)]
+    price = STOCKS[brand_name]["price"]
 
-    inpost_pl_price = 0 if qty >= 5 else 14
+    add_to_cart(call.from_user.id, brand_name, flavor, qty, price)
+
+    kb = InlineKeyboardBuilder()
+    kb.row(types.InlineKeyboardButton(text="🛒 Перейти в корзину", callback_data="show_cart"))
+    kb.row(types.InlineKeyboardButton(text="⬅️ Продолжить покупки", callback_data="back_to_cats"))
+
+    await call.message.edit_text(f"✅ Успешно добавлено в корзину:\n<b>{brand_name} — {flavor} ({qty} шт.)</b>\n\nЧто делаем дальше?", reply_markup=kb.as_markup())
+
+
+# Отображение корзины
+@dp.message(F.text == "🛒 Корзина")
+async def show_cart_msg(message: types.Message):
+    await handle_show_cart(message, message.from_user.id)
+
+@dp.callback_query(F.data == "show_cart")
+async def show_cart_cb(call: types.CallbackQuery):
+    await handle_show_cart(call.message, call.from_user.id)
+
+async def handle_show_cart(message: types.Message, user_id: int):
+    cart = get_cart(user_id)
+    if not cart:
+        text = "🛒 <b>Твоя корзина пуста.</b>\nЗагляни в витрину!"
+        kb = InlineKeyboardBuilder()
+        kb.row(types.InlineKeyboardButton(text="☁️ В витрину", callback_data="back_to_cats"))
+        if isinstance(message, types.Message) and message.text == "🛒 Корзина":
+            await message.answer(text, reply_markup=kb.as_markup())
+        else:
+            await message.edit_text(text, reply_markup=kb.as_markup())
+        return
+
+    text = "🛒 <b>Твоя корзина:</b>\n\n"
+    total_sum = 0
+    total_qty = 0
+    for i, (brand, flavor, qty, price) in enumerate(cart, 1):
+        item_sum = qty * price
+        total_sum += item_sum
+        total_qty += qty
+        text += f"{i}. {brand} — {flavor}\n   {qty} шт. x {price}zł = <b>{item_sum}zł</b>\n"
+
+    text += f"\n📦 <b>Всего товаров:</b> {total_qty} шт.\n"
+    text += f"💰 <b>Сумма:</b> {total_sum}zł\n"
+    if total_qty >= 5:
+        text += "<i>🎁 Доставка InPost (Польша) будет бесплатной!</i>\n"
+
+    kb = InlineKeyboardBuilder()
+    kb.row(types.InlineKeyboardButton(text="✅ Оформить заказ", callback_data=f"cart_checkout_{total_sum}_{total_qty}"))
+    kb.row(types.InlineKeyboardButton(text="🗑 Очистить корзину", callback_data="cart_clear"))
+    kb.row(types.InlineKeyboardButton(text="⬅️ Продолжить покупки", callback_data="back_to_cats"))
+
+    if isinstance(message, types.Message) and message.text == "🛒 Корзина":
+        await message.answer(text, reply_markup=kb.as_markup())
+    else:
+        await message.edit_text(text, reply_markup=kb.as_markup())
+
+
+@dp.callback_query(F.data == "cart_clear")
+async def clear_cart_cb(call: types.CallbackQuery):
+    clear_cart(call.from_user.id)
+    await call.answer("Корзина очищена 🗑", show_alert=True)
+    await handle_show_cart(call.message, call.from_user.id)
+
+
+@dp.callback_query(F.data.startswith("cart_checkout_"))
+async def cart_checkout(call: types.CallbackQuery):
+    parts = call.data.split("_")
+    total_sum, total_qty = int(parts[2]), int(parts[3])
+
+    inpost_pl_price = 0 if total_qty >= 5 else 14
     inpost_eu_price = 25 
 
     balance = get_balance(call.from_user.id)
@@ -783,26 +883,26 @@ async def delivery_callback(call: types.CallbackQuery):
     pl_text = "📦 InPost (Польша) - БЕСПЛАТНО" if inpost_pl_price == 0 else f"📦 InPost (Польша) +{inpost_pl_price}zł"
     eu_text = f"🌍 InPost EU (Европа) +{inpost_eu_price}zł"
 
-    keyboard.row(types.InlineKeyboardButton(text=pl_text, callback_data=f"pay_pl_{brand_idx}_{flavor_idx}_{qty}_0"))
-    keyboard.row(types.InlineKeyboardButton(text=eu_text, callback_data=f"pay_eu_{brand_idx}_{flavor_idx}_{qty}_0"))
+    keyboard.row(types.InlineKeyboardButton(text=pl_text, callback_data=f"pay_pl_cart_{total_qty}_{total_sum}_0"))
+    keyboard.row(types.InlineKeyboardButton(text=eu_text, callback_data=f"pay_eu_cart_{total_qty}_{total_sum}_0"))
 
     if balance > 0:
-        use_bonus_pl = min(balance, base_price + inpost_pl_price)
-        use_bonus_eu = min(balance, base_price + inpost_eu_price)
+        use_bonus_pl = min(balance, total_sum + inpost_pl_price)
+        use_bonus_eu = min(balance, total_sum + inpost_eu_price)
 
         keyboard.row(types.InlineKeyboardButton(
             text=f"🎁 InPost (Польша) со скидкой -{use_bonus_pl}zł",
-            callback_data=f"pay_pl_{brand_idx}_{flavor_idx}_{qty}_{use_bonus_pl}"
+            callback_data=f"pay_pl_cart_{total_qty}_{total_sum}_{use_bonus_pl}"
         ))
         keyboard.row(types.InlineKeyboardButton(
             text=f"🎁 InPost EU со скидкой -{use_bonus_eu}zł",
-            callback_data=f"pay_eu_{brand_idx}_{flavor_idx}_{qty}_{use_bonus_eu}"
+            callback_data=f"pay_eu_cart_{total_qty}_{total_sum}_{use_bonus_eu}"
         ))
 
-    keyboard.row(types.InlineKeyboardButton(text="⬅️ Изменить количество", callback_data=f"sl_{brand_idx}_{flavor_idx}"))
+    keyboard.row(types.InlineKeyboardButton(text="⬅️ Вернуться в корзину", callback_data="show_cart"))
 
-    text = (f"📍 <b>Оформление:</b> {brand_name} — {flavor} (<b>{qty} шт.</b>)\n"
-            f"💰 Сумма за товар: {base_price}zł\n\n"
+    text = (f"📍 <b>Оформление заказа</b> (Всего: {total_qty} шт.)\n"
+            f"💰 Сумма за товары: {total_sum}zł\n\n"
             f"Выбери способ доставки:")
 
     await call.message.edit_text(text, reply_markup=keyboard.as_markup())
@@ -811,14 +911,10 @@ async def delivery_callback(call: types.CallbackQuery):
 @dp.callback_query(F.data.startswith("pay_"))
 async def payment_callback(call: types.CallbackQuery):
     parts = call.data.split("_")
-    delivery_code = parts[1]
-    brand_idx, flavor_idx, qty, bonus_int = parts[2], parts[3], int(parts[4]), int(parts[5])
+    d_code = parts[1]
+    qty, base_price, bonus_int = int(parts[3]), int(parts[4]), int(parts[5])
 
-    brand_name = idx_to_brand(brand_idx)
-    flavor = STOCKS.get(brand_name, {}).get("flavors", [])[int(flavor_idx)]
-    base_price = STOCKS.get(brand_name, {}).get("price", 0) * qty
-
-    if delivery_code == 'pl':
+    if d_code == 'pl':
         delivery_price = 0 if qty >= 5 else 14
         delivery_name = "InPost (Польша)"
     else:
@@ -830,7 +926,7 @@ async def payment_callback(call: types.CallbackQuery):
 
     pay_text = (
         f"💳 <b>Оплата заказа</b>\n\n"
-        f"Товар: {brand_name} — {flavor} (<b>{qty} шт.</b>)\n"
+        f"Товаров: <b>{qty} шт.</b>\n"
         f"Способ: {delivery_name}\n"
     )
     if bonus_int > 0:
@@ -845,13 +941,12 @@ async def payment_callback(call: types.CallbackQuery):
     keyboard = InlineKeyboardBuilder()
     keyboard.row(types.InlineKeyboardButton(
         text="✅ Оплатил(а), фото нет",
-        callback_data=f"fin_{delivery_code}_{brand_idx}_{flavor_idx}_{qty}_{final_total}_{bonus_int}"
+        callback_data=f"fin_{d_code}_cart_{qty}_{final_total}_{bonus_int}"
     ))
-    keyboard.row(types.InlineKeyboardButton(text="❌ Отменить", callback_data="back_to_cats"))
+    keyboard.row(types.InlineKeyboardButton(text="❌ Отменить", callback_data="show_cart"))
 
     PAYMENT_PENDING[call.from_user.id] = {
-        "delivery_code": delivery_code, "brand_idx": brand_idx,
-        "flavor_idx": flavor_idx, "qty": qty, "total": final_total, "bonus": bonus_int
+        "d_code": d_code, "qty": qty, "total": final_total, "bonus": bonus_int
     }
     await call.message.edit_text(pay_text, reply_markup=keyboard.as_markup())
 
@@ -859,19 +954,16 @@ async def payment_callback(call: types.CallbackQuery):
 @dp.callback_query(F.data.startswith("fin_"))
 async def finish_callback(call: types.CallbackQuery):
     parts = call.data.split("_")
-    delivery_code, brand_idx, flavor_idx = parts[1], parts[2], parts[3]
-    qty, total, bonus_used = int(parts[4]), int(parts[5]), int(parts[6])
-
-    brand_name = idx_to_brand(brand_idx)
-    flavor = STOCKS.get(brand_name, {}).get("flavors", [])[int(flavor_idx)]
+    delivery_code = parts[1]
+    qty, total, bonus_used = int(parts[3]), int(parts[4]), int(parts[5])
 
     PAYMENT_PENDING.pop(call.from_user.id, None)
     delivery_name = "InPost (Польша)" if delivery_code == 'pl' else "InPost EU"
 
-    await _create_order(
+    await _create_cart_order(
         bot=call.bot, user_id=call.from_user.id,
         username=call.from_user.username or "без ника",
-        brand_name=brand_name, flavor=flavor, qty=qty, total=total,
+        qty=qty, total=total,
         delivery=delivery_name,
         bonus_used=bonus_used, photo_id=None,
         message=call.message, is_callback=True
@@ -889,18 +981,30 @@ def _build_admin_order_kb(order_id, user_id):
     return kb.as_markup()
 
 
-async def _create_order(bot, user_id, username, brand_name, flavor, qty, total, delivery,
-                        bonus_used, photo_id, message, is_callback=False):
+async def _create_cart_order(bot, user_id, username, qty, total, delivery, bonus_used, photo_id, message, is_callback=False):
+    cart = get_cart(user_id)
+    if not cart:
+        if is_callback: await message.edit_text("Корзина пуста.")
+        else: await bot.send_message(user_id, "Корзина пуста.")
+        return
+
+    # Собираем данные корзины в JSON для базы и в строку для Гугл Таблиц
+    cart_json_data = json.dumps([{"b": b, "f": f, "q": q} for b, f, q, p in cart])
+    flavor_str = ", ".join([f"{b} {f} (x{q})" for b, f, q, p in cart])
+    brand_name = "Сборный заказ"
+
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO orders (user_id, item_name, flavor, quantity, total, delivery, info, status, photo_id) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING order_id",
-        (user_id, brand_name, flavor, qty, total, delivery, "", "WAIT_DATA", photo_id)
+        "INSERT INTO orders (user_id, item_name, flavor, quantity, total, delivery, info, status, photo_id, cart_data) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING order_id",
+        (user_id, brand_name, flavor_str, qty, total, delivery, "", "WAIT_DATA", photo_id, cart_json_data)
     )
     order_id = cur.fetchone()[0]
     conn.commit()
     conn.close()
+
+    clear_cart(user_id)
 
     if bonus_used > 0:
         spend_balance(user_id, bonus_used)
@@ -927,7 +1031,6 @@ async def back_to_cats(call: types.CallbackQuery):
 
 # --- ЧАСТЬ 9: ОБРАБОТКА ТЕКСТА И ФОТО ---
 
-# Доп. команда для обнуления кассы
 @dp.message(Command("reset_kassa"))
 async def reset_kassa_command(message: types.Message):
     if not is_admin(message.from_user.id):
@@ -947,15 +1050,12 @@ async def photo_handler(message: types.Message):
 
     if message.from_user.id in PAYMENT_PENDING:
         pending = PAYMENT_PENDING.pop(message.from_user.id)
-        brand_name = idx_to_brand(pending["brand_idx"])
-        flavor = STOCKS.get(brand_name, {}).get("flavors", [])[int(pending["flavor_idx"])]
-        delivery_name = "InPost (Польша)" if pending["delivery_code"] == 'pl' else "InPost EU"
+        delivery_name = "InPost (Польша)" if pending["d_code"] == 'pl' else "InPost EU"
 
         await message.answer("✅ Скриншот получен! Сейчас заполним данные для доставки.")
-        await _create_order(
+        await _create_cart_order(
             bot=bot, user_id=message.from_user.id,
             username=message.from_user.username or "без ника",
-            brand_name=brand_name, flavor=flavor,
             qty=pending["qty"], total=pending["total"],
             delivery=delivery_name,
             bonus_used=pending["bonus"], photo_id=message.photo[-1].file_id,
@@ -1081,7 +1181,7 @@ async def text_handler(message: types.Message):
                 admin_text = (
                     f"💰 <b>НОВЫЙ ЗАКАЗ</b>\n"
                     f"👤 @{username} (<code>{user_id}</code>)\n"
-                    f"📦 {item} — {flavor} (<b>{qty} шт.</b>)\n"
+                    f"📦 {item}\n🔖 {flavor}\n"
                     f"💵 Сумма: <b>{total}zł</b>\n"
                     f"🚚 Доставка: {delivery}\n\n"
                     f"📋 <b>Данные доставки:</b>\n{info_text}\n\n"
@@ -1118,7 +1218,7 @@ async def confirm_order(call: types.CallbackQuery):
     cur = conn.cursor()
     
     cur.execute("""
-        SELECT o.item_name, o.flavor, o.quantity, o.total, o.delivery, o.status, u.username 
+        SELECT o.item_name, o.flavor, o.quantity, o.total, o.delivery, o.status, o.cart_data, u.username 
         FROM orders o 
         LEFT JOIN users u ON o.user_id = u.user_id 
         WHERE o.order_id = %s
@@ -1129,7 +1229,7 @@ async def confirm_order(call: types.CallbackQuery):
         conn.close()
         return await call.answer("Заказ не найден", show_alert=True)
     
-    item_name, flavor, qty, total, delivery, status, username = row
+    item_name, flavor, qty, total, delivery, status, cart_data_json, username = row
     username_str = username if username else str(user_id)
     
     if status == "Подтверждён":
@@ -1144,13 +1244,25 @@ async def confirm_order(call: types.CallbackQuery):
     conn.commit()
     conn.close()
 
-    new_qty = decrement_stock(item_name, flavor, amount=qty)
-    if new_qty <= LOW_STOCK_THRESHOLD:
-        for adm in ADMINS:
-            try:
-                await bot.send_message(adm, f"⚠️ <b>Товар заканчивается!</b>\n📦 {item_name} — {flavor}\nОстаток: <b>{new_qty} шт.</b>")
-            except Exception:
-                pass
+    # Списываем остатки умным способом (если это корзина - списываем каждый товар)
+    if cart_data_json and cart_data_json != '[]':
+        try:
+            items = json.loads(cart_data_json)
+            for item in items:
+                new_qty = decrement_stock(item['b'], item['f'], amount=item['q'])
+                if new_qty <= LOW_STOCK_THRESHOLD:
+                    for adm in ADMINS:
+                        try: await bot.send_message(adm, f"⚠️ <b>Товар заканчивается!</b>\n📦 {item['b']} — {item['f']}\nОстаток: <b>{new_qty} шт.</b>")
+                        except Exception: pass
+        except Exception:
+            pass
+    else:
+        # Для старых одиночных заказов
+        new_qty = decrement_stock(item_name, flavor, amount=qty)
+        if new_qty <= LOW_STOCK_THRESHOLD:
+            for adm in ADMINS:
+                try: await bot.send_message(adm, f"⚠️ <b>Товар заканчивается!</b>\n📦 {item_name} — {flavor}\nОстаток: <b>{new_qty} шт.</b>")
+                except Exception: pass
     
     await call.message.edit_text(call.message.text + "\n\n✅ <b>Подтверждено!</b>")
     await bot.send_message(user_id, "✅ <b>Оплата подтверждена!</b>\nТвой заказ принят в обработку. Скоро получишь трек-номер. 🚀")
@@ -1229,7 +1341,7 @@ async def order_delivered(call: types.CallbackQuery):
 
     try:
         await bot.send_message(user_id,
-            f"☁️ <b>Как тебе заказ?</b>\n\n📦 <b>{item_name} — {flavor}</b>\n\n"
+            f"☁️ <b>Как тебе заказ?</b>\n\n📦 <b>{item_name}</b>\n\n"
             f"Сначала поставь общую оценку 👇",
             reply_markup=kb.as_markup())
     except Exception:
@@ -1442,7 +1554,8 @@ async def review_publish(call: types.CallbackQuery):
     stars = "⭐" * rating
     channel_text = (
         f"☁️ <b>Отзыв покупателя</b>\n\n"
-        f"📦 <b>{item_name}</b> — {flavor}\n"
+        f"📦 <b>{item_name}</b>\n"
+        f"🔖 {flavor}\n"
         f"Оценка: {stars}\n"
     )
     if any(v is not None for v in [strength, taste, vapor]):
