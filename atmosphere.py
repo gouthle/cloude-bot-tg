@@ -432,7 +432,7 @@ async def my_orders_handler(message: types.Message):
 
 @dp.message(F.text == "\U0001f91d Поддержка")
 async def support_handler(message: types.Message):
-    await message.answer("Связь с менеджером: @твой_ник\nПиши по любым вопросам! \U0001f680")
+    await message.answer("Связь с менеджером: @Alinagdmo\nПиши по любым вопросам! \U0001f680")
 
 
 # --- ЧАСТЬ 7: АДМИН-ПАНЕЛЬ СКЛАДА ---
