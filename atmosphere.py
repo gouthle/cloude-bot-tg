@@ -459,6 +459,7 @@ async def start_handler(message: types.Message):
     conn.commit()
     conn.close()
 
+    # ИСПРАВЛЕННАЯ ЛОГИКА РЕФЕРАЛКИ - БЕЗ МОМЕНТАЛЬНОГО НАЧИСЛЕНИЯ
     if is_new and referrer_id and referrer_id != message.from_user.id:
         conn = get_conn()
         cur = conn.cursor()
@@ -471,12 +472,11 @@ async def start_handler(message: types.Message):
             )
             conn.commit()
             conn.close()
-            add_balance(referrer_id, REFERRAL_BONUS)
             try:
                 await bot.send_message(
                     referrer_id,
-                    f"🎉 По твоей ссылке зарегистрировался новый пользователь!\n"
-                    f"На твой счёт начислено <b>+{REFERRAL_BONUS}zł</b> бонусов 💰"
+                    f"🎉 По твоей ссылке зарегистрировался друг!\n"
+                    f"Как только он оплатит свой первый заказ, на твой счёт автоматически начислится <b>+{REFERRAL_BONUS}zł</b> 💰"
                 )
             except Exception:
                 pass
@@ -741,7 +741,7 @@ async def flavors_callback(call: types.CallbackQuery):
 
     if brand_data and brand_data["photo"]:
         await call.message.delete()
-        await call.bot.send_photo(call.from_user.id, brand_data["photo"], caption=caption, reply_markup=keyboard.as_markup())
+        await call.bot.send_photo(call.fromuser.id, brand_data["photo"], caption=caption, reply_markup=keyboard.as_markup())
     else:
         await call.message.edit_text(caption, reply_markup=keyboard.as_markup())
 
@@ -886,9 +886,13 @@ async def cart_checkout(call: types.CallbackQuery):
     keyboard.row(types.InlineKeyboardButton(text=pl_text, callback_data=f"pay_pl_cart_{total_qty}_{total_sum}_0"))
     keyboard.row(types.InlineKeyboardButton(text=eu_text, callback_data=f"pay_eu_cart_{total_qty}_{total_sum}_0"))
 
+    # ИСПРАВЛЕННАЯ ЛОГИКА ОГРАНИЧЕНИЯ СПИСАНИЯ БОНУСОВ (МАКСИМУМ 50%)
     if balance > 0:
-        use_bonus_pl = min(balance, total_sum + inpost_pl_price)
-        use_bonus_eu = min(balance, total_sum + inpost_eu_price)
+        max_allowed_bonus_pl = int((total_sum + inpost_pl_price) * 0.5)
+        use_bonus_pl = min(balance, max_allowed_bonus_pl)
+        
+        max_allowed_bonus_eu = int((total_sum + inpost_eu_price) * 0.5)
+        use_bonus_eu = min(balance, max_allowed_bonus_eu)
 
         keyboard.row(types.InlineKeyboardButton(
             text=f"🎁 InPost (Польша) со скидкой -{use_bonus_pl}zł",
@@ -1266,6 +1270,30 @@ async def confirm_order(call: types.CallbackQuery):
     
     await call.message.edit_text(call.message.text + "\n\n✅ <b>Подтверждено!</b>")
     await bot.send_message(user_id, "✅ <b>Оплата подтверждена!</b>\nТвой заказ принят в обработку. Скоро получишь трек-номер. 🚀")
+
+    # --- ИСПРАВЛЕННАЯ ЛОГИКА: НАЧИСЛЕНИЕ РЕФЕРАЛЬНОГО БОНУСА ПОСЛЕ ОПЛАТЫ ---
+    conn_ref = get_conn()
+    cur_ref = conn_ref.cursor()
+    cur_ref.execute("SELECT referrer_id FROM referrals WHERE referred_id = %s", (user_id,))
+    ref_row = cur_ref.fetchone()
+    
+    if ref_row:
+        referrer_id = ref_row[0]
+        cur_ref.execute("SELECT COUNT(*) FROM orders WHERE user_id = %s AND status = 'Подтверждён'", (user_id,))
+        paid_orders_count = cur_ref.fetchone()[0]
+        
+        if paid_orders_count == 1: 
+            add_balance(referrer_id, REFERRAL_BONUS)
+            try:
+                await bot.send_message(
+                    referrer_id,
+                    f"🎁 Твой друг только что оплатил свой первый заказ!\n"
+                    f"На твой счёт зачислено <b>+{REFERRAL_BONUS}zł</b>. Спасибо за рекомендацию! ☁️"
+                )
+            except Exception:
+                pass
+    conn_ref.close()
+    # --------------------------------------------------------------------------
 
     await append_order_to_sheet(order_id, username_str, item_name, flavor, qty, total, delivery, total_revenue)
     await send_group_report(order_id, username_str, item_name, flavor, qty, total, delivery, total_revenue)
