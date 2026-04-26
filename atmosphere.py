@@ -459,7 +459,6 @@ async def start_handler(message: types.Message):
     conn.commit()
     conn.close()
 
-    # ИСПРАВЛЕННАЯ ЛОГИКА РЕФЕРАЛКИ - БЕЗ МОМЕНТАЛЬНОГО НАЧИСЛЕНИЯ
     if is_new and referrer_id and referrer_id != message.from_user.id:
         conn = get_conn()
         cur = conn.cursor()
@@ -741,7 +740,8 @@ async def flavors_callback(call: types.CallbackQuery):
 
     if brand_data and brand_data["photo"]:
         await call.message.delete()
-        await call.bot.send_photo(call.fromuser.id, brand_data["photo"], caption=caption, reply_markup=keyboard.as_markup())
+        # ИСПРАВЛЕНА ОПЕЧАТКА ТУТ: call.from_user.id
+        await call.bot.send_photo(call.from_user.id, brand_data["photo"], caption=caption, reply_markup=keyboard.as_markup())
     else:
         await call.message.edit_text(caption, reply_markup=keyboard.as_markup())
 
@@ -886,7 +886,6 @@ async def cart_checkout(call: types.CallbackQuery):
     keyboard.row(types.InlineKeyboardButton(text=pl_text, callback_data=f"pay_pl_cart_{total_qty}_{total_sum}_0"))
     keyboard.row(types.InlineKeyboardButton(text=eu_text, callback_data=f"pay_eu_cart_{total_qty}_{total_sum}_0"))
 
-    # ИСПРАВЛЕННАЯ ЛОГИКА ОГРАНИЧЕНИЯ СПИСАНИЯ БОНУСОВ (МАКСИМУМ 50%)
     if balance > 0:
         max_allowed_bonus_pl = int((total_sum + inpost_pl_price) * 0.5)
         use_bonus_pl = min(balance, max_allowed_bonus_pl)
@@ -999,10 +998,11 @@ async def _create_cart_order(bot, user_id, username, qty, total, delivery, bonus
 
     conn = get_conn()
     cur = conn.cursor()
+    # ИСПРАВЛЕН БАГ СО СТАТУСОМ WAIT_DATA
     cur.execute(
         "INSERT INTO orders (user_id, item_name, flavor, quantity, total, delivery, info, status, photo_id, cart_data) "
         "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING order_id",
-        (user_id, brand_name, flavor_str, qty, total, delivery, "", "WAIT_DATA", photo_id, cart_json_data)
+        (user_id, brand_name, flavor_str, qty, total, delivery, "", "Ожидает данные доставки", photo_id, cart_json_data)
     )
     order_id = cur.fetchone()[0]
     conn.commit()
@@ -1248,7 +1248,6 @@ async def confirm_order(call: types.CallbackQuery):
     conn.commit()
     conn.close()
 
-    # Списываем остатки умным способом (если это корзина - списываем каждый товар)
     if cart_data_json and cart_data_json != '[]':
         try:
             items = json.loads(cart_data_json)
@@ -1261,7 +1260,6 @@ async def confirm_order(call: types.CallbackQuery):
         except Exception:
             pass
     else:
-        # Для старых одиночных заказов
         new_qty = decrement_stock(item_name, flavor, amount=qty)
         if new_qty <= LOW_STOCK_THRESHOLD:
             for adm in ADMINS:
@@ -1271,7 +1269,6 @@ async def confirm_order(call: types.CallbackQuery):
     await call.message.edit_text(call.message.text + "\n\n✅ <b>Подтверждено!</b>")
     await bot.send_message(user_id, "✅ <b>Оплата подтверждена!</b>\nТвой заказ принят в обработку. Скоро получишь трек-номер. 🚀")
 
-    # --- ИСПРАВЛЕННАЯ ЛОГИКА: НАЧИСЛЕНИЕ РЕФЕРАЛЬНОГО БОНУСА ПОСЛЕ ОПЛАТЫ ---
     conn_ref = get_conn()
     cur_ref = conn_ref.cursor()
     cur_ref.execute("SELECT referrer_id FROM referrals WHERE referred_id = %s", (user_id,))
@@ -1293,7 +1290,6 @@ async def confirm_order(call: types.CallbackQuery):
             except Exception:
                 pass
     conn_ref.close()
-    # --------------------------------------------------------------------------
 
     await append_order_to_sheet(order_id, username_str, item_name, flavor, qty, total, delivery, total_revenue)
     await send_group_report(order_id, username_str, item_name, flavor, qty, total, delivery, total_revenue)
