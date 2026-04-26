@@ -10,7 +10,6 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart, Command
 from aiogram.types import BotCommand, LinkPreviewOptions
 from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
-from aiogram.utils.deep_linking import create_start_link
 from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
 try:
@@ -102,7 +101,6 @@ async def append_order_to_sheet(order_id, username, item_name, flavor, qty, tota
             logging.error(f"Sheet append error: {e}")
     await asyncio.get_event_loop().run_in_executor(None, _write)
 
-REFERRAL_BONUS = 5
 LOW_STOCK_THRESHOLD = 2
 
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
@@ -196,28 +194,6 @@ def decrement_stock(brand: str, flavor: str, amount: int = 1) -> int:
     conn.close()
     return row[0] if row else 0
 
-def get_balance(user_id: int) -> int:
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT balance FROM users WHERE user_id = %s", (user_id,))
-    row = cur.fetchone()
-    conn.close()
-    return row[0] if row else 0
-
-def add_balance(user_id: int, amount: int):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("UPDATE users SET balance = balance + %s WHERE user_id = %s", (amount, user_id))
-    conn.commit()
-    conn.close()
-
-def spend_balance(user_id: int, amount: int):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("UPDATE users SET balance = GREATEST(0, balance - %s) WHERE user_id = %s", (amount, user_id))
-    conn.commit()
-    conn.close()
-
 def get_all_user_ids() -> list:
     conn = get_conn()
     cur = conn.cursor()
@@ -276,9 +252,7 @@ def init_db():
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id BIGINT PRIMARY KEY,
-            username TEXT,
-            referrer_id BIGINT,
-            balance INTEGER DEFAULT 0
+            username TEXT
         )
     """)
 
@@ -322,13 +296,6 @@ def init_db():
             flavor TEXT,
             quantity INTEGER DEFAULT 0,
             PRIMARY KEY (brand, flavor)
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS referrals (
-            referrer_id BIGINT,
-            referred_id BIGINT PRIMARY KEY
         )
     """)
 
@@ -419,8 +386,8 @@ async def set_main_menu_button(bot: Bot):
 def get_main_keyboard():
     builder = ReplyKeyboardBuilder()
     builder.row(types.KeyboardButton(text="☁️ Витрина"), types.KeyboardButton(text="🛒 Корзина"))
-    builder.row(types.KeyboardButton(text="📥 Мои заказы"), types.KeyboardButton(text="💰 Бонусы"))
-    builder.row(types.KeyboardButton(text="⭐️ Отзывы"), types.KeyboardButton(text="🤝 Поддержка"))
+    builder.row(types.KeyboardButton(text="📥 Мои заказы"), types.KeyboardButton(text="⭐️ Отзывы"))
+    builder.row(types.KeyboardButton(text="🤝 Поддержка"))
     return builder.as_markup(resize_keyboard=True)
 
 BROADCAST_PENDING = set()
@@ -432,55 +399,15 @@ REVIEW_PENDING = {}
 
 @dp.message(CommandStart())
 async def start_handler(message: types.Message):
-    start_command = message.text.split()
-    referrer_raw = start_command[1] if len(start_command) > 1 else None
-
-    referrer_id = None
-    if referrer_raw and referrer_raw.isdigit():
-        referrer_id = int(referrer_raw)
-    elif referrer_raw:
-        try:
-            import base64
-            decoded = base64.urlsafe_b64decode(referrer_raw + "==").decode()
-            if decoded.isdigit():
-                referrer_id = int(decoded)
-        except Exception:
-            pass
-
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT 1 FROM users WHERE user_id = %s", (message.from_user.id,))
-    is_new = cur.fetchone() is None
     cur.execute(
-        "INSERT INTO users (user_id, username, referrer_id, balance) VALUES (%s, %s, %s, 0) "
+        "INSERT INTO users (user_id, username) VALUES (%s, %s) "
         "ON CONFLICT (user_id) DO NOTHING",
-        (message.from_user.id, message.from_user.username, referrer_id)
+        (message.from_user.id, message.from_user.username)
     )
     conn.commit()
     conn.close()
-
-    if is_new and referrer_id and referrer_id != message.from_user.id:
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute("SELECT 1 FROM referrals WHERE referred_id = %s", (message.from_user.id,))
-        already = cur.fetchone()
-        if not already:
-            cur.execute(
-                "INSERT INTO referrals (referrer_id, referred_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
-                (referrer_id, message.from_user.id)
-            )
-            conn.commit()
-            conn.close()
-            try:
-                await bot.send_message(
-                    referrer_id,
-                    f"🎉 По твоей ссылке зарегистрировался друг!\n"
-                    f"Как только он оплатит свой первый заказ, на твой счёт автоматически начислится <b>+{REFERRAL_BONUS}zł</b> 💰"
-                )
-            except Exception:
-                pass
-        else:
-            conn.close()
 
     welcome_text = (
         f"Salute, <b>{message.from_user.first_name}</b>! 👋\n\n"
@@ -497,26 +424,6 @@ async def catalog_handler(message: types.Message):
         idx = brand_to_idx(brand)
         keyboard.row(types.InlineKeyboardButton(text=brand, callback_data=f"brn_{idx}"))
     await message.answer("✨ <b>Каталог продукции</b>\nВыбери бренд:", reply_markup=keyboard.as_markup())
-
-
-@dp.message(F.text == "💰 Бонусы")
-async def bonus_handler(message: types.Message):
-    balance = get_balance(message.from_user.id)
-    link = await create_start_link(bot, str(message.from_user.id), encode=True)
-
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id = %s", (message.from_user.id,))
-    ref_count = cur.fetchone()[0]
-    conn.close()
-
-    await message.answer(
-        f"💰 <b>Твой баланс: {balance}zł</b>\n\n"
-        f"👥 Приглашено друзей: <b>{ref_count}</b>\n"
-        f"🎁 За каждого друга: <b>+{REFERRAL_BONUS}zł</b>\n\n"
-        f"Бонусы можно потратить при оформлении заказа!\n\n"
-        f"<b>Твоя реферальная ссылка:</b>\n<code>{link}</code>"
-    )
 
 
 @dp.message(F.text == "⭐️ Отзывы")
@@ -740,7 +647,6 @@ async def flavors_callback(call: types.CallbackQuery):
 
     if brand_data and brand_data["photo"]:
         await call.message.delete()
-        # ИСПРАВЛЕНА ОПЕЧАТКА ТУТ: call.from_user.id
         await call.bot.send_photo(call.from_user.id, brand_data["photo"], caption=caption, reply_markup=keyboard.as_markup())
     else:
         await call.message.edit_text(caption, reply_markup=keyboard.as_markup())
@@ -877,30 +783,13 @@ async def cart_checkout(call: types.CallbackQuery):
     inpost_pl_price = 0 if total_qty >= 5 else 14
     inpost_eu_price = 25 
 
-    balance = get_balance(call.from_user.id)
     keyboard = InlineKeyboardBuilder()
 
     pl_text = "📦 InPost (Польша) - БЕСПЛАТНО" if inpost_pl_price == 0 else f"📦 InPost (Польша) +{inpost_pl_price}zł"
     eu_text = f"🌍 InPost EU (Европа) +{inpost_eu_price}zł"
 
-    keyboard.row(types.InlineKeyboardButton(text=pl_text, callback_data=f"pay_pl_cart_{total_qty}_{total_sum}_0"))
-    keyboard.row(types.InlineKeyboardButton(text=eu_text, callback_data=f"pay_eu_cart_{total_qty}_{total_sum}_0"))
-
-    if balance > 0:
-        max_allowed_bonus_pl = int((total_sum + inpost_pl_price) * 0.5)
-        use_bonus_pl = min(balance, max_allowed_bonus_pl)
-        
-        max_allowed_bonus_eu = int((total_sum + inpost_eu_price) * 0.5)
-        use_bonus_eu = min(balance, max_allowed_bonus_eu)
-
-        keyboard.row(types.InlineKeyboardButton(
-            text=f"🎁 InPost (Польша) со скидкой -{use_bonus_pl}zł",
-            callback_data=f"pay_pl_cart_{total_qty}_{total_sum}_{use_bonus_pl}"
-        ))
-        keyboard.row(types.InlineKeyboardButton(
-            text=f"🎁 InPost EU со скидкой -{use_bonus_eu}zł",
-            callback_data=f"pay_eu_cart_{total_qty}_{total_sum}_{use_bonus_eu}"
-        ))
+    keyboard.row(types.InlineKeyboardButton(text=pl_text, callback_data=f"pay_pl_cart_{total_qty}_{total_sum}"))
+    keyboard.row(types.InlineKeyboardButton(text=eu_text, callback_data=f"pay_eu_cart_{total_qty}_{total_sum}"))
 
     keyboard.row(types.InlineKeyboardButton(text="⬅️ Вернуться в корзину", callback_data="show_cart"))
 
@@ -915,7 +804,7 @@ async def cart_checkout(call: types.CallbackQuery):
 async def payment_callback(call: types.CallbackQuery):
     parts = call.data.split("_")
     d_code = parts[1]
-    qty, base_price, bonus_int = int(parts[3]), int(parts[4]), int(parts[5])
+    qty, base_price = int(parts[3]), int(parts[4])
 
     if d_code == 'pl':
         delivery_price = 0 if qty >= 5 else 14
@@ -924,17 +813,12 @@ async def payment_callback(call: types.CallbackQuery):
         delivery_price = 25
         delivery_name = "InPost EU"
 
-    total_price = base_price + delivery_price
-    final_total = max(0, total_price - bonus_int)
+    final_total = base_price + delivery_price
 
     pay_text = (
         f"💳 <b>Оплата заказа</b>\n\n"
         f"Товаров: <b>{qty} шт.</b>\n"
         f"Способ: {delivery_name}\n"
-    )
-    if bonus_int > 0:
-        pay_text += f"🎁 Бонусная скидка: -{bonus_int}zł\n"
-    pay_text += (
         f"<b>Сумма к оплате: {final_total}zł</b>\n\n"
         f"Переведи ровную сумму по BLIK на номер:\n<code>{PHONE_NUMBER}</code>\n\n"
         "📸 После оплаты пришли <b>скриншот чека</b> следующим сообщением.\n"
@@ -944,12 +828,12 @@ async def payment_callback(call: types.CallbackQuery):
     keyboard = InlineKeyboardBuilder()
     keyboard.row(types.InlineKeyboardButton(
         text="✅ Оплатил(а), фото нет",
-        callback_data=f"fin_{d_code}_cart_{qty}_{final_total}_{bonus_int}"
+        callback_data=f"fin_{d_code}_cart_{qty}_{final_total}"
     ))
     keyboard.row(types.InlineKeyboardButton(text="❌ Отменить", callback_data="show_cart"))
 
     PAYMENT_PENDING[call.from_user.id] = {
-        "d_code": d_code, "qty": qty, "total": final_total, "bonus": bonus_int
+        "d_code": d_code, "qty": qty, "total": final_total
     }
     await call.message.edit_text(pay_text, reply_markup=keyboard.as_markup())
 
@@ -958,7 +842,7 @@ async def payment_callback(call: types.CallbackQuery):
 async def finish_callback(call: types.CallbackQuery):
     parts = call.data.split("_")
     delivery_code = parts[1]
-    qty, total, bonus_used = int(parts[3]), int(parts[4]), int(parts[5])
+    qty, total = int(parts[3]), int(parts[4])
 
     PAYMENT_PENDING.pop(call.from_user.id, None)
     delivery_name = "InPost (Польша)" if delivery_code == 'pl' else "InPost EU"
@@ -968,7 +852,7 @@ async def finish_callback(call: types.CallbackQuery):
         username=call.from_user.username or "без ника",
         qty=qty, total=total,
         delivery=delivery_name,
-        bonus_used=bonus_used, photo_id=None,
+        photo_id=None,
         message=call.message, is_callback=True
     )
 
@@ -984,7 +868,7 @@ def _build_admin_order_kb(order_id, user_id):
     return kb.as_markup()
 
 
-async def _create_cart_order(bot, user_id, username, qty, total, delivery, bonus_used, photo_id, message, is_callback=False):
+async def _create_cart_order(bot, user_id, username, qty, total, delivery, photo_id, message, is_callback=False):
     cart = get_cart(user_id)
     if not cart:
         if is_callback: await message.edit_text("Корзина пуста.")
@@ -998,7 +882,6 @@ async def _create_cart_order(bot, user_id, username, qty, total, delivery, bonus
 
     conn = get_conn()
     cur = conn.cursor()
-    # ИСПРАВЛЕН БАГ СО СТАТУСОМ WAIT_DATA
     cur.execute(
         "INSERT INTO orders (user_id, item_name, flavor, quantity, total, delivery, info, status, photo_id, cart_data) "
         "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING order_id",
@@ -1009,9 +892,6 @@ async def _create_cart_order(bot, user_id, username, qty, total, delivery, bonus
     conn.close()
 
     clear_cart(user_id)
-
-    if bonus_used > 0:
-        spend_balance(user_id, bonus_used)
 
     set_collect(user_id, {"step": "name", "order_id": order_id,
                            "name": "", "phone": "", "email": "", "paczkomat": ""})
@@ -1062,7 +942,7 @@ async def photo_handler(message: types.Message):
             username=message.from_user.username or "без ника",
             qty=pending["qty"], total=pending["total"],
             delivery=delivery_name,
-            bonus_used=pending["bonus"], photo_id=message.photo[-1].file_id,
+            photo_id=message.photo[-1].file_id,
             message=message, is_callback=False
         )
 
@@ -1268,28 +1148,6 @@ async def confirm_order(call: types.CallbackQuery):
     
     await call.message.edit_text(call.message.text + "\n\n✅ <b>Подтверждено!</b>")
     await bot.send_message(user_id, "✅ <b>Оплата подтверждена!</b>\nТвой заказ принят в обработку. Скоро получишь трек-номер. 🚀")
-
-    conn_ref = get_conn()
-    cur_ref = conn_ref.cursor()
-    cur_ref.execute("SELECT referrer_id FROM referrals WHERE referred_id = %s", (user_id,))
-    ref_row = cur_ref.fetchone()
-    
-    if ref_row:
-        referrer_id = ref_row[0]
-        cur_ref.execute("SELECT COUNT(*) FROM orders WHERE user_id = %s AND status = 'Подтверждён'", (user_id,))
-        paid_orders_count = cur_ref.fetchone()[0]
-        
-        if paid_orders_count == 1: 
-            add_balance(referrer_id, REFERRAL_BONUS)
-            try:
-                await bot.send_message(
-                    referrer_id,
-                    f"🎁 Твой друг только что оплатил свой первый заказ!\n"
-                    f"На твой счёт зачислено <b>+{REFERRAL_BONUS}zł</b>. Спасибо за рекомендацию! ☁️"
-                )
-            except Exception:
-                pass
-    conn_ref.close()
 
     await append_order_to_sheet(order_id, username_str, item_name, flavor, qty, total, delivery, total_revenue)
     await send_group_report(order_id, username_str, item_name, flavor, qty, total, delivery, total_revenue)
