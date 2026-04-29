@@ -351,12 +351,12 @@ STOCKS = {
     "VOZOL Salt": {
         "flavors": ["Strawberry Watermelon", "Kiwi Passion Fruit Guava", "Berry", "Berry Peach"],
         "photo": "AgACAgIAAxkBAAICbmnlTR8eWQcAATCwLgAB4Qpan_dwJF4AAiIZaxugqSlLvokeaQm4iO8BAAMCAAN3AAM7BA",
-        "price": 45
+        "price": 40
     },
     "ELFLIQ Salt": {
         "flavors": ["Blackberry Lemon", "Blueberry Sour Raspberry", "Blueberry Lemon", "Watermelon", "Pina Colada"],
         "photo": "AgACAgIAAxkBAAICfGnlUOyZ0JA7KfcuGPo4vncBgBhpAAIqGWsboKkpS0545fr-HtvFAQADAgADeAADOwQ",
-        "price": 45
+        "price": 40
     }
 }
 
